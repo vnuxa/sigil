@@ -1,0 +1,209 @@
+// importing stuffl ooks like this
+
+
+use ./src/test 
+
+// if you want to use a specific object
+
+use ./src/test with test
+
+// or multiple
+
+use ./src/test with [ test; var2 ]
+
+
+global trait = std.display.traits
+
+
+test.data = 2
+
+
+test = 5;
+
+global = true;
+
+data = attributes {
+    test = "hi"
+}
+
+data = attrs {
+    test = "hi"
+}
+
+data = map {
+    test = "hi"
+}
+
+data = set {
+    asd = "test"
+    asd2 = {
+        print("hi")
+    }
+}
+
+data = dict {
+    
+}
+local data = set {
+    asd = "hi"
+    test = {
+        "hello"
+    } 
+
+}
+
+global test = "hi"
+
+// rec - just like in nix, means that you can use the values within the data object as if they were global/local variables 
+local data = object |> rec { 
+    hi = true
+    status = { if hi { return "the status of hi is true" } else { return "no hi.." } }
+}
+
+local data = object: rec {
+    hi = false
+    test = hi
+}
+
+// rec is just object but data can be self refrenced
+local data = rec {
+    hi = "hello",
+    test = hi,
+}
+
+
+
+
+/// stuff to display here
+fn testing_function(var: boolean) -> string {
+    print("hi", std.to_string(var))
+    // or this, they both do the same thign
+    print("hi", var.to_string())
+}
+
+// no type mention - any type
+
+fn any_func(var) -> string {
+    print("i got a thing of any type:", std.string.try_convert(var))
+}
+
+fn any_func(var: impl std.traits.Display) -> string {
+    print("i got a thing of any type:", var.display())
+    // closure test
+    local closure = || {
+        print("this is inside of a closure, and i can also print var", var)
+    }
+
+}
+
+
+// number iterator
+for index in 0..10 {
+    
+}
+
+// iterating over attribute set
+for object in data {
+    print("i am object! ", object)
+}
+
+
+
+// astrum example?
+
+// add a file, something akin to a .luarc file which specifies custom modules/paths
+// instead of needing to rely on local dictionaries
+use astrum
+
+global app = astrum:application()
+global widgets = astrum.widgets
+global style = astrum.style
+
+app:make_window("test", set {
+    anchor = [ "left" "right" "bottom" "top" ]
+    exclusive_zone = 20,
+    view = fn() {
+        return widgets:centerbox(set {
+            width = "fill"
+            height = ( "fixed", 30 ) // tuple
+            left_child = widgets:button(set {
+                on_press = "button_signal"
+                child = widgets:text("hello there")
+            }),
+            right_child = widgets:text("i am another text", set { text_color = style:rgba(255, 0, 0) })
+
+        })
+    }
+})
+
+// syntax proposal 2, this time with defaults implementations for stuff?
+
+
+// maybe app.window can be either a set or the app.window
+app:make_window("test", app.window {
+    anchor = [ "left" "right" "bottom" "top" ]
+    exclusive_zone = 20,
+    view = fn() {
+        // widgets.centerbox will be of a sign type
+        return widgets.centerbox { 
+            width = "fill"
+            height = ( "fixed", 30 ) // tuple
+            left_child = widgets.button {
+                on_press = "button_signal"
+                child = widgets:text("hello there")
+            },
+            right_child = widgets:text("i am another text", set { text_color = style:rgba(255, 0, 0) })
+            middle_child = widgets.text {
+                text = "i am a text that uses the text sign"
+                width = "fill"
+            }
+        }
+    }
+    subscriptions = [
+        subscriptions.hyprland {
+            workspaces = "workspace_moved"
+        }
+        subscriptions.mpris {
+            track_changed = "track_changed"
+        }
+        subscription.calls {
+            test = "hi_signal"
+        }
+    ]
+    signals = set {
+        button_signal = fn() {
+            print("the button signal has been pressed")
+        }
+        workspace_moved = fn(workspaces: subscriptions.hyprland.workspaces) {
+            global_data.workspaces = workspaces
+        }
+        track_changed = fn(metadata: subscriptions.mpris.track_changed) {
+            if metadata.track.empty == true { return }
+
+            global_data.player = metadata.player
+            global_data.music = metadata.track.title
+        }
+    }
+})
+
+
+match test {
+    5 => {
+        print("hello world!!", "this is the second line of rpint" .. "added a strnig with this")
+        print("wow")
+    }
+    _ => {
+        print("unknown number of stuff")
+    }
+}
+
+return 5;
+
+// bonus desc:
+
+this language will not need to spam ; at the end of each line
+it is only nesscessary when you want to define inline stuff, then everything must have a semicolon at the end
+example: if criteria { print("hi"); print("hello2") } else { print("wow"); print("wow2") }; if criteria2 { ... } ...
+yo uget the idea
+in other words, newlines or semicolons are seperators for each operator
+

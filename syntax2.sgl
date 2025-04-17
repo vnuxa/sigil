@@ -1,0 +1,73 @@
+global test = {}
+
+
+impl test {
+    // self is defined from impl
+    fn hello(self) {
+        print("this is a hello")
+    }
+}
+
+
+// to trigger it, maybe?
+
+test:hello()
+
+
+
+// also traits, maybe rename to somethign else?
+
+trait hello_trait {
+    fn hello(self) 
+    // trait with default implementation
+    fn output(self) {
+        print("i will do hello")
+        self:hello()
+    }
+}
+
+// TODO: maybe something thats like traits but for attribute sets
+// so for example: have a function that says for stuff that specific traits 
+// the term for it shall be sign
+
+sign hello_object {
+    //  use : becuase it is defining types, not setting them
+    has_greeted: bool
+    greeted_sum: number
+}
+
+// making an object with sign type
+
+local test = hello_object {
+    has_greeted = false
+    greeted_sum = 0
+}
+
+
+// this trait will be used in for example functions
+
+fn hi_function(hello_object: impl hello_trait) {
+    self:output()
+}
+
+// signs can define default trait
+
+local custom_obj = sign {
+    is_default: bool
+}
+
+impl std.traits.Default for custom_obj {
+    fn default() -> Self {
+        return custom_obj {
+            is_default = true
+        }
+        // or like this
+        return Self {
+            is_default = true
+        }
+    }
+}
+
+
+
+
