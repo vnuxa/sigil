@@ -9,7 +9,7 @@ use ./src/test with test
 
 // or multiple
 
-use ./src/test with [ test; var2 ]
+use "./src/test" with [ test; var2 ]
 
 
 global trait = std.display.traits
@@ -70,6 +70,45 @@ local data = rec {
     hi = "hello",
     test = hi,
 }
+
+// most starting characters
+
+global bob = 1
+fn
+bob = 2
+if
+while
+for
+local
+return
+//
+trait
+impl
+sign
+loop
+break
+continue
+enum
+type (maybe?? might use a different word for it??)
+match (IF scope does not have a return)
+
+
+
+
+// after starting characters, expressions or whatever
+// for assigning
+
+numbers (1-9)
+strings ('this is a string' or even "this is a string")
+bools (true, false)
+match (IF scope has a return)
+tuples
+sets 
+functions
+scopes ( {  } <- that is a scope, if used for assinging, scope should return a value)
+lists ( [ "test1", 2 ] <- this is a list, lists will have commas placed automatically per each newline and if the last token can end a statement)
+
+
 
 
 
