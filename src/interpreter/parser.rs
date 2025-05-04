@@ -553,7 +553,7 @@ pub fn postfix_binding_power(token: &Tokens) -> Option<u8> {
     }
 }
 
-pub fn generate(input: String) {
+pub fn generate(input: String) -> Vec<Expressions> {
     let mut lexer = Tokens::lexer(&input);
 
     let mut tokens = Vec::new();
@@ -569,13 +569,18 @@ pub fn generate(input: String) {
     }
     tokens.reverse();
 
+    let mut output_vec = Vec::new();
     loop {
         let output = parser(&mut tokens, 0);
         println!("parser outputu: {:?}", output);
 
         if let Expressions::EndOfFile = output {
             break;
+        } else {
+            output_vec.push(output);
         }
     }
+
+    output_vec
     // println!("parser output: {:?}", parser(&mut tokens, 0));
 }

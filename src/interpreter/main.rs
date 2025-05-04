@@ -220,7 +220,7 @@ fn new_parser<'src>() -> impl Parser<
 //     tokens
 // }
 
-pub fn generate(input: String) {
+pub fn generate(input: String) -> Expressions {
     let lexer = StatementTokens::lexer(&input);
 
     let mut tokens = Vec::new();
@@ -237,7 +237,7 @@ pub fn generate(input: String) {
     }
 
     // parses tokens to produce an abstarct syntax tree
-    let abstract_syntax_tree = match new_parser().parse(&tokens).into_result() {
+    match new_parser().parse(&tokens).into_result() {
         Ok(expression) => {
             println!("[AST]\n{:#?}", expression);
             expression
@@ -245,7 +245,7 @@ pub fn generate(input: String) {
         Err(e) => {
             panic!("parse error: {:#?}", e);
         }
-    };
+    }
 
     // println!("\n[result]:\n {:?}", abstract_syntax_tree.eval());
 
