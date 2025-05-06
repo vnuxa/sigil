@@ -237,37 +237,135 @@ impl Module {
         // context.instructions.push(instruction);
     }
 
-    pub fn build_dominance(&self, dominance: &mut IndexVec<usize, Vec<usize>>) {
+    pub fn build_dominance(&self) -> IndexVec<usize, usize> {
         // dominance - block id, vector of block ids
         // TODO: i dont know if this is correct
         // but iterate over reverse *post* order
         // due to this, the language cannot have a `goto` statement
         // should look into adding something similar to a goto, or fulfills a similar purpose
-        for block in self.blocks.iter().rev() {
-            let mut predecessor_dominance = Vec::with_capacity(block.predecessors.len());
-            let mut output_dominance = vec![block.id];
 
-            for predecessor in &block.predecessors {
-                if let Some(dominators) = dominance.get(*predecessor) {
-                    predecessor_dominance.push(dominators);
-                }
-            }
+        let mut changed = true;
 
-            if let Some(pred) = predecessor_dominance.first() {
-                'outer_dom: for dominator in pred.iter() {
-                    let mut iter = predecessor_dominance.iter();
-                    iter.next();
-                    for other_dominator in iter {
-                        if (*other_dominator).contains(dominator) {
-                            output_dominance.push(*dominator);
-                            continue 'outer_dom;
-                        }
+        let post_order = {
+            fn visit(
+                module: &Module,
+                block_id: usize,
+                post_order: &mut Vec<usize>,
+                visited: &mut IndexVec<usize, bool>,
+            ) {
+                for successor in &module.blocks {
+                    if !visited[successor.id] {
+                        visited[successor.id] = true;
+                        visit(module, successor.id, post_order, visited);
                     }
                 }
+
+                post_order.push(block_id);
             }
 
-            dominance[block.id] = output_dominance;
+            let mut post_order = Vec::new(); //maybe make it wiht the capacity of all blocks?
+            let mut visited = index_vec!(false; self.blocks.len());
+
+            visit(self, 0, &mut post_order, &mut visited);
+
+            post_order
+        };
+
+        let post_indices = {
+            let mut indices = index_vec!(None; self.blocks.len());
+            for (index, block) in post_order.iter().enumerate() {
+                indices[*block] = Some(index);
+            }
+
+            indices
+        };
+
+        let mut domination = index_vec!(None; self.blocks.len());
+
+        let mut changed = true;
+
+        while changed {
+            changed = false;
+
+            for block_id in post_order.iter().rev().copied() {
+                if block_id == 0 {
+                    continue;
+                }
+
+                let block = &self.blocks[block_id];
+
+                let mut new_dom = post_indices
+                    .get(block.predecessors[0])
+                    .unwrap()
+                    .expect("wow"); // mighjt be erorr
+                // prone?
+
+                // TODO: rewrite this whole thing
+                for predecessor in block.predecessors.iter().skip(1).copied() {
+                    let Some(Some(pred)) = post_indices.get(predecessor) else {
+                        continue;
+                    };
+                    let pred = *pred;
+                    if domination[pred].is_some() {
+                        let mut x = new_dom;
+                        let mut y = pred;
+
+                        while x != y {
+                            while x < y {
+                                x = domination[x].unwrap();
+                            }
+                            while y < x {
+                                y = domination[y].unwrap();
+                            }
+                        }
+
+                        new_dom = x;
+                    }
+                }
+
+                let block_indice = post_indices.get(block_id).unwrap().expect("wow");
+                if domination[block_indice] != Some(new_dom) {
+                    domination[block_indice] = Some(new_dom);
+                    changed = true;
+                }
+            }
         }
+
+        let mut output = IndexVec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            if let Some(Some(post_index)) = post_indices.get(block.id) {
+                let immediate_index = domination[*post_index].unwrap();
+                output.push(post_order[immediate_index]);
+            }
+        }
+
+        output
+
+        // for block in self.blocks.iter() {
+        //     let mut predecessor_dominance = Vec::with_capacity(block.predecessors.len());
+        //     let mut output_dominance = vec![block.id];
+        //
+        //     for predecessor in &block.predecessors {
+        //         if let Some(dominators) = dominance.get(*predecessor) {
+        //             predecessor_dominance.push(dominators);
+        //         }
+        //     }
+        //
+        //     if let Some(pred) = predecessor_dominance.first() {
+        //         'outer_dom: for dominator in pred.iter() {
+        //             let mut iter = predecessor_dominance.iter();
+        //             iter.next();
+        //             for other_dominator in iter {
+        //                 if (*other_dominator).contains(dominator) {
+        //                     output_dominance.push(*dominator);
+        //                     continue 'outer_dom;
+        //                 }
+        //             }
+        //         }
+        //     }
+        //
+        //     dominance[block.id] = output_dominance;
+        // }
     }
 
     // IMPORTANT: finish dominence frontiers!!!!

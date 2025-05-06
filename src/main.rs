@@ -55,8 +55,8 @@ local asd = test + 5
     }
     println!("the length of block: {:?}", ir.blocks.len());
     // let dominance = IndexVec::with_capacity(ir.blocks.len());
-    let mut dominance = index_vec![Vec::new(); ir.blocks.len()];
-    ir.build_dominance(&mut dominance);
+    // let mut dominance = index_vec![Vec::new(); ir.blocks.len()];
+    let mut dominance = ir.build_dominance();
 
     println!("post building dominance |||");
     let frontier = ir.dominance_frontiers(&dominance);
