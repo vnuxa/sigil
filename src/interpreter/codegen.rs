@@ -335,7 +335,7 @@ impl Module {
                 context.instructions.push(Instruction::JumpConditional(
                     context.instructions.len() - 1,
                     scope,
-                    scope + 1, // self.blocks.len() - 1,
+                    self.blocks.len() - 1, // self.blocks.len() - 1,
                 ));
 
                 println!("RETURNING BLOCK: {:?}", new_block);
