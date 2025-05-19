@@ -11,7 +11,7 @@ use super::parser::Expressions;
 // pub fn to_bytecode(expression: Expressions) -> Opcode {}
 
 #[derive(Clone, Debug)]
-pub enum Instruction {
+pub enum InstructionData {
     // Value(Value),
     LoadNumber(isize),
     LoadBool(bool),
@@ -34,6 +34,7 @@ pub enum Instruction {
     Copy(usize),
     CompareEqual(usize, usize),           // instruction id, instruction id
     JumpConditional(usize, usize, usize), // instruction id, jump if true, jump if false
+    ParallelCopy(usize, usize),           // instruction_id, copy id
     EndOfFile,
 }
 
@@ -43,17 +44,36 @@ pub enum Value {
     Bool(bool),
 }
 
+// #[derive(Clone)]
+// pub struct Block {
+//     pub instructions: Vec<InstructionData>,
+//     pub id: usize,
+//     // pub successors: Vec<usize>,
+//     // pub predecessors: Vec<usize>, // mgiht be useless?
+// }
+
 #[derive(Clone)]
 pub struct Block {
-    pub instructions: Vec<Instruction>,
     pub id: usize,
-    // pub successors: Vec<usize>,
-    // pub predecessors: Vec<usize>, // mgiht be useless?
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+    pub size: usize,
+}
+
+#[derive(Clone)]
+pub struct Instruction {
+    pub data: InstructionData,
+    pub block: Option<usize>,
+    pub next: Option<usize>,
+    pub previous: Option<usize>,
+    pub id: usize,
 }
 
 pub struct Module {
+    // pub blocks: Vec<Block>,
     pub blocks: Vec<Block>,
     pub variables: IndexVec<usize, String>,
+    pub instructions: IndexVec<usize, Instruction>,
     pub variable_definitions: IndexVec<usize, Vec<usize>>, // variable index -  blocks that define it
     pub phi_instructions: IndexVec<usize, Vec<(usize, usize)>>, // Vec<block_id, instruction_id>
                                                            // pub phi_instructions: IndexVec<usize, Vec<usize>>, // IndexVec<block_id, // Vec<isntruction_id>
@@ -62,63 +82,306 @@ pub struct Module {
 impl Module {
     pub fn new() -> Self {
         Self {
+            // blocks: Vec::new(),
             blocks: Vec::new(),
             variables: IndexVec::new(),
             variable_definitions: IndexVec::new(),
+            instructions: IndexVec::new(),
             phi_instructions: IndexVec::new(),
         }
     }
     pub fn new_block(&mut self) -> usize {
         let id = self.blocks.len();
         let block = Block {
-            instructions: Vec::new(),
-            // successors: Vec::new(),
-            // predecessors: Vec::new(),
+            // start: self.instructions.len(),
+            start: None,
+            end: None,
+            size: 0,
             id,
         };
+        // let block = Block {
+        //     instructions: Vec::new(),
+        //     // successors: Vec::new(),
+        //     // predecessors: Vec::new(),
+        //     id,
+        // };
         self.blocks.push(block);
 
         id
     }
 
-    // pub fn new_block_with(
-    //     &mut self,
-    //     // predecessors: Vec<usize>,
-    //     current_block: &mut Block,
-    // ) -> usize {
-    //     let id = self.blocks.len();
-    //     // for block_id in &current_block.predecessors {
-    //     //     println!("changing predeceessor: {:?} and adding: {:?}", block_id, id);
-    //     //     self.blocks[*block_id].successors.push(id);
-    //     // }
-    //     println!("applying succeosr {:?} to block {:?}", id, current_block.id);
-    //     // current_block.successors.push(id);
-    //     // if let Some(write_to) = option_write {
-    //     //     write_to.successors.push(id);
-    //     // }
-    //     let block = Block {
-    //         instructions: Vec::new(),
-    //         // successors: Vec::new(),
-    //         id,
-    //         // predecessors: vec![current_block.id],
-    //     };
-    //     self.blocks.push(block);
-    //
-    //     id
-    // }
+    pub fn add_instruction(&mut self, block_id: usize, instruction: InstructionData) -> usize {
+        let block = &mut self.blocks[block_id];
+        let old_last = block.end;
+
+        let id = self.instructions.len();
+        if let Some(end_id) = old_last {
+            self.instructions[end_id].next = Some(id);
+            block.end = Some(id);
+            block.size += 1;
+        } else {
+            block.start = Some(id);
+            block.end = Some(id);
+            block.size = 1;
+        }
+
+        self.instructions.push(Instruction {
+            data: instruction,
+            previous: old_last,
+            next: None,
+            block: Some(block_id),
+            id: self.instructions.len(),
+        });
+
+        id
+    }
+
+    // creates a new instruction, without adding it
+    pub fn new_instruction(&mut self, instruction: InstructionData) -> usize {
+        let id = self.instructions.len();
+
+        self.instructions.push(Instruction {
+            data: instruction,
+            previous: None,
+            next: None,
+            block: None,
+            id,
+        });
+
+        id
+    }
+
+    pub fn remove_instruction(&mut self, instruction_id: usize) -> Option<usize> {
+        let instruction = &mut self.instructions[instruction_id];
+        // let Some(instruction_block) = instruction.block else {
+        //     return None;
+        // };
+        let block = &mut self.blocks[instruction.block?];
+
+        let old_previous = instruction.previous;
+        let old_next = instruction.next;
+        instruction.previous = None;
+        instruction.next = None;
+        instruction.block = None;
+
+        if let Some(previous) = old_previous {
+            self.instructions[previous].next = old_next;
+        } else {
+            block.start = old_next;
+        }
+
+        if let Some(next) = old_next {
+            self.instructions[next].previous = old_previous;
+        } else {
+            block.end = old_previous;
+        }
+
+        block.size -= 1;
+
+        old_next
+    }
+
+    pub fn insert_instruction(
+        &mut self,
+        block_id: usize,
+        reference: Option<usize>,
+        instruction_id: usize,
+    ) {
+        let block = &mut self.blocks[block_id];
+
+        let (previous, next) = {
+            if let Some(reference_id) = reference {
+                (Some(reference_id), self.instructions[reference_id].next)
+            } else {
+                (None, block.start)
+            }
+        };
+
+        let instruction = &mut self.instructions[instruction_id];
+
+        instruction.block = Some(block_id);
+        instruction.previous = previous;
+        instruction.next = next;
+        block.size += 1;
+
+        if let Some(prev) = previous {
+            self.instructions[prev].next = Some(instruction_id);
+        } else {
+            block.start = Some(instruction_id);
+        }
+
+        if let Some(next) = next {
+            self.instructions[next].previous = Some(instruction_id);
+        } else {
+            block.end = Some(instruction_id);
+        }
+    }
+
+    pub fn instruction_args<F: FnMut(usize)>(
+        &self,
+        instruction: &InstructionData,
+        mut callback: F,
+    ) {
+        match instruction {
+            InstructionData::Copy(data) => callback(*data),
+            InstructionData::Phi(map_id) => {
+                // let mut map = core::mem::take(&self.phi_instructions[map_id]);
+
+                // let map = &mut module.phi_instructions[map_id];
+                for (_, data) in &self.phi_instructions[*map_id] {
+                    println!("              within phi \\/");
+                    callback(*data);
+                }
+                // println!("ok data after: {:?}", map);
+
+                // self.phi_instructions[map_id] = map;
+            }
+            InstructionData::Add(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+            InstructionData::Subtract(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+            InstructionData::Multiply(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+            InstructionData::Divide(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+            InstructionData::Remainder(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+            InstructionData::CompareEqual(num_1, num_2) => {
+                callback(*num_1);
+                callback(*num_2);
+            }
+
+            InstructionData::JumpConditional(instruction, _, _) => callback(*instruction),
+
+            // TODO: add more comparisons, return, calls, tuples, lists here too
+            _ => {}
+        }
+    }
+    pub fn replace_instruction<F: FnMut(&Module, &mut usize)>(
+        &mut self,
+        instruction: &mut InstructionData,
+        mut callback: F,
+    ) {
+        match instruction {
+            InstructionData::Copy(data) => callback(self, data),
+            InstructionData::Phi(map_id) => {
+                let mut map = core::mem::take(&mut self.phi_instructions[*map_id]);
+
+                // let map = &mut module.phi_instructions[map_id];
+                for (_, data) in &mut map {
+                    println!("              within phi \\/");
+                    callback(self, data);
+                }
+                println!("ok data after: {:?}", map);
+
+                self.phi_instructions[*map_id] = map;
+            }
+            InstructionData::Add(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+            InstructionData::Subtract(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+            InstructionData::Multiply(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+            InstructionData::Divide(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+            InstructionData::Remainder(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+            InstructionData::CompareEqual(num_1, num_2) => {
+                callback(self, num_1);
+                callback(self, num_2);
+            }
+
+            InstructionData::JumpConditional(instruction, _, _) => callback(self, instruction),
+
+            // TODO: add more comparisons, return, calls, tuples, lists here too
+            _ => {}
+        }
+    }
+    pub fn for_block<F: FnMut(&Instruction)>(&self, block_id: usize, mut callback: F) {
+        let mut at = self.blocks[block_id].start;
+        while let Some(id) = at {
+            let instruction = &self.instructions[id];
+            callback(instruction);
+
+            at = instruction.next;
+        }
+    }
+    pub fn for_block_mut<F: FnMut(&mut Instruction)>(&mut self, block_id: usize, mut callback: F) {
+        let mut at = self.blocks[block_id].start;
+        while let Some(id) = at {
+            let instruction = &mut self.instructions[id];
+            callback(instruction);
+
+            at = instruction.next;
+        }
+    }
+
+    // loops over every instruction and runs a function for every single argument they have
+    pub fn block_replace_args<F: FnMut(&Module, &mut usize)>(
+        &mut self,
+        block_id: usize,
+        mut callback: F,
+    ) {
+        let mut at = self.blocks[block_id].start;
+        while let Some(id) = at {
+            // TODO: might not have to clone?
+            let mut data = self.instructions[id].data.clone();
+            println!("before: {:?}", self.instructions[id].data);
+            self.replace_instruction(&mut data, &mut callback);
+            println!("ok after: {:?}", self.instructions[id].data);
+            // callback(self, instruction.id);
+
+            let instr = &mut self.instructions[id];
+            instr.data = data;
+            at = instr.next;
+            // at = self.instructions[id].next;
+        }
+    }
+
+    pub fn all_args<F: FnMut(usize)>(&self, mut callback: F) {
+        for block in &self.blocks {
+            let mut at = block.start;
+            while let Some(id) = at {
+                let instruction = &self.instructions[id];
+                self.instruction_args(&instruction.data, &mut callback);
+
+                at = instruction.next;
+            }
+        }
+    }
 
     pub fn get_successors<F: FnMut(usize)>(&self, block_id: usize, mut callback: F) {
         let block = &self.blocks[block_id];
 
-        let last_instruction = block.instructions.last().unwrap();
+        // let last_instruction = block.instructions.last().unwrap();
 
-        match last_instruction {
-            Instruction::Jump(target) => callback(*target),
-            Instruction::JumpConditional(_, target_1, target_2) => {
-                callback(*target_1);
-                callback(*target_2)
+        match self.instructions[block.end.unwrap()].data {
+            InstructionData::Jump(target) => callback(target),
+            InstructionData::JumpConditional(_, target_1, target_2) => {
+                callback(target_1);
+                callback(target_2)
             }
-            Instruction::EndOfFile => {}
+            InstructionData::EndOfFile => {}
             _ => unimplemented!("tried calling successors on an unterminated block"),
         }
     }
@@ -134,47 +397,51 @@ impl Module {
     }
     pub fn build_instruction(
         &mut self,
-        context: &mut Block,
+        context_id: usize,
         expressions: Expressions,
     ) -> Option<usize> {
         match expressions {
             Expressions::Int(num) => {
-                context.instructions.push(Instruction::LoadNumber(num));
+                self.add_instruction(context_id, InstructionData::LoadNumber(num));
             }
             Expressions::Bool(bool) => {
-                context.instructions.push(Instruction::LoadBool(bool));
+                self.add_instruction(context_id, InstructionData::LoadBool(bool));
             }
             Expressions::String(value) => {
-                context.instructions.push(Instruction::LoadString(value));
+                self.add_instruction(context_id, InstructionData::LoadString(value));
             }
             Expressions::Variable(value) => {
-                // self.variables.push(value);
-                context
-                    .instructions
-                    .push(Instruction::GetVariable(self.variables.len() - 1));
+                self.add_instruction(
+                    context_id,
+                    InstructionData::GetVariable(self.variables.len() - 1),
+                );
             }
             Expressions::LocalDefine(name, value) => {
                 let Expressions::Variable(var_name) = *name else {
                     panic!()
                 };
 
-                context
-                    .instructions
-                    .push(Instruction::MakeLocal(var_name.clone()));
+                self.add_instruction(context_id, InstructionData::MakeLocal(var_name.clone()));
+                // context.instructions.push();
 
                 // IMPORTANT: make a way to add to the variable_defintions
                 // and a way to track current block?
                 if let Some(value) = value {
-                    let _ = self.build_instruction(context, *value);
+                    let _ = self.build_instruction(context_id, *value);
+                    let context = &self.blocks[context_id];
                     self.variables.push(var_name);
-                    context.instructions.push(Instruction::SetVariable(
-                        self.variables.len() - 1,
-                        context.instructions.len() - 1,
-                    ));
+                    self.add_instruction(
+                        context.id,
+                        InstructionData::SetVariable(
+                            self.variables.len() - 1,
+                            // context.instructions.len() - 1,
+                            context.end.unwrap(),
+                        ),
+                    );
                 };
             }
             Expressions::Assign(name, value) => {
-                self.build_instruction(context, *value);
+                self.build_instruction(context_id, *value);
                 let mut id = None;
                 for (index, value) in self.variables.iter().enumerate() {
                     if name == *value {
@@ -183,56 +450,87 @@ impl Module {
                     }
                 }
 
+                let context = &self.blocks[context_id];
+                self.add_instruction(
+                    context.id,
+                    InstructionData::SetVariable(
+                        id.unwrap(),
+                        context.end.unwrap(),
+                        // context.instructions.len(),
+                    ),
+                );
                 // self.variables.push(name);
-                context.instructions.push(Instruction::SetVariable(
-                    id.unwrap(),
-                    context.instructions.len(),
-                ));
+                // context.instructions.push(Instruction::SetVariable(
+                //     id.unwrap(),
+                //     context.instructions.len(),
+                // ));
             }
             Expressions::Add(left_side, right_side) => {
-                self.build_instruction(context, *left_side);
-                self.build_instruction(context, *right_side);
-                let length = context.instructions.len() - 1;
+                self.build_instruction(context_id, *left_side);
+                self.build_instruction(context_id, *right_side);
+                let context = &self.blocks[context_id];
+                // let length = context.instructions.len() - 1;
 
-                context
-                    .instructions
-                    .push(Instruction::Add(length - 1, length));
+                // println!("CONTEXT LEN: {:?}", self.blocks[context.id].size);
+                self.add_instruction(
+                    context.id,
+                    InstructionData::Add(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        context.end.unwrap(),
+                    ),
+                );
             }
             Expressions::Subtract(left_side, right_side) => {
-                self.build_instruction(context, *left_side);
-                self.build_instruction(context, *right_side);
-                let length = context.instructions.len() - 1;
+                self.build_instruction(context_id, *left_side);
+                self.build_instruction(context_id, *right_side);
+                let context = &self.blocks[context_id];
 
-                context
-                    .instructions
-                    .push(Instruction::Subtract(length - 1, length));
+                self.add_instruction(
+                    context.id,
+                    InstructionData::Subtract(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        context.end.unwrap(),
+                    ),
+                );
             }
             Expressions::Multiply(left_side, right_side) => {
-                self.build_instruction(context, *left_side);
-                self.build_instruction(context, *right_side);
-                let length = context.instructions.len() - 1;
+                self.build_instruction(context_id, *left_side);
+                self.build_instruction(context_id, *right_side);
 
-                context
-                    .instructions
-                    .push(Instruction::Multiply(length - 1, length));
+                let context = &self.blocks[context_id];
+                self.add_instruction(
+                    context.id,
+                    InstructionData::Multiply(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        context.end.unwrap(),
+                    ),
+                );
             }
             Expressions::Divide(left_side, right_side) => {
-                self.build_instruction(context, *left_side);
-                self.build_instruction(context, *right_side);
-                let length = context.instructions.len() - 1;
+                self.build_instruction(context_id, *left_side);
+                self.build_instruction(context_id, *right_side);
+                let context = &self.blocks[context_id];
 
-                context
-                    .instructions
-                    .push(Instruction::Divide(length - 1, length));
+                self.add_instruction(
+                    context.id,
+                    InstructionData::Divide(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        context.end.unwrap(),
+                    ),
+                );
             }
             Expressions::Remainder(left_side, right_side) => {
-                self.build_instruction(context, *left_side);
-                self.build_instruction(context, *right_side);
-                let length = context.instructions.len() - 1;
+                self.build_instruction(context_id, *left_side);
+                self.build_instruction(context_id, *right_side);
+                let context = &self.blocks[context_id];
 
-                context
-                    .instructions
-                    .push(Instruction::Remainder(length - 1, length));
+                self.add_instruction(
+                    context.id,
+                    InstructionData::Remainder(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        context.end.unwrap(),
+                    ),
+                );
             }
             Expressions::Scope(new_scope) => {
                 let mut new_block_id =
@@ -241,7 +539,6 @@ impl Module {
                 // } else {
                     self.new_block();
                 // };
-                let mut new_block = self.blocks[new_block_id].clone();
 
                 // println!("NEW SCOPE!!!!!!!!!!!!!");
                 // let mut predecessors = context.predecessors.clone();
@@ -267,13 +564,14 @@ impl Module {
                 let mut first_id = new_block_id;
                 for expression in new_scope {
                     // let new_block = &mut self.blocks[new_block_id];
-                    if let Some(obj) = self.build_instruction(&mut new_block, expression) {
-                        if self.blocks[self.blocks.len() - 1].instructions.is_empty() {
+                    if let Some(obj) = self.build_instruction(new_block_id, expression) {
+                        if self.blocks[self.blocks.len() - 1].size == 0 {
                             self.blocks.pop();
                         }
-                        self.blocks[new_block_id] = new_block;
+                        // self.blocks[new_block_id] = new_block;
+                        // new_block_id = self.new_block();
+                        // new_block = self.blocks[new_block_id].clone();
                         new_block_id = self.new_block();
-                        new_block = self.blocks[new_block_id].clone();
                     }
 
                     // println!("wow the instruction was {:?}", wow);
@@ -281,10 +579,8 @@ impl Module {
 
                 // TODO: best case in performance would be not to have these blocks that are made by the if
                 // function that are untracked in the first place
-                if new_block.instructions.is_empty() {
+                if self.blocks[new_block_id].size == 0 {
                     self.blocks.swap_remove(new_block_id);
-                } else {
-                    self.blocks[new_block_id] = new_block;
                 }
                 // if !new_block.instructions.is_empty() {
                 // } else {
@@ -304,39 +600,25 @@ impl Module {
             Expressions::If(conditional, scope) => {
                 // maybe make a new block for the condition though i dont think that is nesscessary
                 // let condition
-                let first_scope = self.build_instruction(context, *conditional);
-                let scope = self.build_instruction(context, *scope).unwrap();
+                let first_scope = self.build_instruction(context_id, *conditional);
+                let scope = self.build_instruction(context_id, *scope).unwrap();
                 let mut new_block = self.new_block();
+                let context = &self.blocks[context_id];
 
-                // self.blocks[new_block]
-                //     .instructions
-                //     .push(Instruction::LoadString("marked!".to_string()));
-                // let new_block = if let None = self.blocks.last().unwrap().instructions.last() {
-                //     self.blocks.len() - 1
-                // } else {
-                //     self.new_block()
-                // };
-
-                // match self.blocks[scope].instructions.last() {
-                //     Some(Instruction::Jump(_) | Instruction::JumpConditional(_, _, _)) => {}
-                //     Some(_) => {
-                //         // add jump instruction
-                //         self.blocks[scope]
-                //             .instructions
-                //             .push(Instruction::Jump(new_block));
-                //     }
-                //     None => {
-                //         self.blocks[scope]
-                //             .instructions
-                //             .push(Instruction::Jump(new_block));
-                //         // remove block
-                //     }
-                // }
-                context.instructions.push(Instruction::JumpConditional(
-                    context.instructions.len() - 1,
-                    scope,
-                    self.blocks.len() - 1, // self.blocks.len() - 1,
-                ));
+                self.add_instruction(
+                    context.id,
+                    InstructionData::JumpConditional(
+                        context.end.unwrap(),
+                        // context.instructions.len() - 1,
+                        scope,
+                        self.blocks.len() - 1, // self.blocks.len() - 1,
+                    ),
+                );
+                // context.instructions.push(Instruction::JumpConditional(
+                //     context.instructions.len() - 1,
+                //     scope,
+                //     self.blocks.len() - 1, // self.blocks.len() - 1,
+                // ));
 
                 println!("RETURNING BLOCK: {:?}", new_block);
                 // make it jump to the new block made thats after the if scope
@@ -347,14 +629,24 @@ impl Module {
             Expressions::CompareEqual(primary_variable, other_variable) => {
                 // maybe make a new block for the condition though i dont think that is nesscessary
                 // let condition
-                self.build_instruction(context, *primary_variable);
-                self.build_instruction(context, *other_variable);
+                self.build_instruction(context_id, *primary_variable);
+                self.build_instruction(context_id, *other_variable);
+                let context = &self.blocks[context_id];
 
-                context.instructions.push(Instruction::CompareEqual(
-                    context.instructions.len() - 2,
-                    context.instructions.len() - 1,
-                    // context.instructions.len() - 1,
-                ));
+                self.add_instruction(
+                    context.id,
+                    InstructionData::CompareEqual(
+                        self.instructions[context.end.unwrap()].previous.unwrap(),
+                        // context.instructions.len() - 2,
+                        context.end.unwrap(), // context.instructions.len() - 1,
+                                              // context.instructions.len() - 1,
+                    ),
+                );
+                // context.instructions.push(Instruction::CompareEqual(
+                //     context.instructions.len() - 2,
+                //     context.instructions.len() - 1,
+                //     // context.instructions.len() - 1,
+                // ));
             }
             e => {
                 println!("instruction {:?}, not yet implemented", e);
@@ -650,21 +942,32 @@ impl Module {
 
             let mut stack = Vec::new();
             for block in &self.blocks {
-                for instruction in &block.instructions {
-                    let Instruction::SetVariable(id, _) = instruction else {
-                        continue;
-                    };
-
-                    if !visited[block.id][*id] {
-                        visited[block.id][*id] = true;
-                        stack.push((block.id, id));
+                self.for_block(block.id, |instruction| {
+                    if let InstructionData::SetVariable(id, _) = instruction.data {
+                        if !visited[block.id][id] {
+                            visited[block.id][id] = true;
+                            stack.push((block.id, id));
+                        }
                     }
-                }
+                    // let Instruction::SetVariable(id, _) = instruction else {
+                    // };
+                });
+                // for instruction in &block.instructions {
+                //     let Instruction::SetVariable(id, _) = instruction else {
+                //         continue;
+                //     };
+                //
+                //     if !visited[block.id][*id] {
+                //         visited[block.id][*id] = true;
+                //         stack.push((block.id, id));
+                //     }
+                // }
             }
 
             let mut phis: IndexVec<usize, Vec<(usize, Vec<(usize, Option<usize>)>, usize)>> =
                 index_vec!(vec![]; self.blocks.len());
 
+            let mut map_size = 0;
             while let Some((from_block, variable_id)) = stack.pop() {
                 for to_block in dominance_frontier[from_block].iter().copied() {
                     let mut to_phis = &mut phis[to_block];
@@ -673,7 +976,7 @@ impl Module {
                     // this block
                     let is_new = to_phis
                         .iter()
-                        .find(|(num, _, _)| num == variable_id)
+                        .find(|(num, _, _)| num == &variable_id)
                         .is_none();
                     if is_new {
                         let predecessor = &predecessors[to_block];
@@ -681,19 +984,21 @@ impl Module {
                         // variable_id isntead??
 
                         let map = predecessor.iter().map(|pred| (*pred, None)).collect();
-                        let phi = Instruction::Phi(self.phi_instructions.len());
+                        let phi = self.new_instruction(InstructionData::Phi(0));
+                        // self.phi_instructions.push()
+                        // map_size += 1;
 
                         // TODO: try not to clone
                         to_phis.push((
-                            *variable_id,
+                            variable_id,
                             map,
-                            // predecessor.clone(),
-                            self.phi_instructions.len(),
+                            phi, // predecessor.clone(),
+                                 // self.phi_instructions.len(),
                         ));
 
                         // to_block now defines a variable
-                        if !visited[from_block][*variable_id] {
-                            visited[from_block][*variable_id] = true;
+                        if !visited[from_block][variable_id] {
+                            visited[from_block][variable_id] = true;
                             stack.push((from_block, variable_id));
                         }
                         // let map = predecessor.iter().map(|predecessor_id| predecessor_id).collect();
@@ -721,43 +1026,44 @@ impl Module {
 
                 // println!("the length of instructions: {:?}", block.instructions.len());
                 // println!("block id is {:?}", block.id);
-                for (index, mut instruction) in block.instructions.iter_mut().enumerate() {
-                    match instruction {
+                // let mut index = 0;
+                module.for_block_mut(block_id, |instruction| {
+                    match instruction.data {
                         // IMPORTANT: instructions might not be proprely applying due to
                         // cloning
-                        Instruction::GetVariable(id) => {
+                        InstructionData::GetVariable(id) => {
                             println!("got it for variable {:?}", id);
-                            for variable in &module.variables {
-                                println!("      {:?}", variable);
-                            }
-                            for variable in &new_names {
-                                println!("      new name: {:?}", variable);
-                            }
-                            println!("current index: {:?}", index);
-                            let new_name = new_names[*id].unwrap();
-                            println!("new name: {:?}", new_name);
+                            // println!("current index: {:?}", index);
+                            let new_name = new_names[id].unwrap();
+                            // println!("new name: {:?}", new_name);
                             // TOOD: make a copy instruction
-                            new_names[*id] = Some(index);
+                            // FIXME: get some sort of way to get the id of the id of the
+                            // instruction
+                            new_names[id] = Some(instruction.id);
                             println!(
                                 "ok its after set and the value for both is: old: {:?} | new: {:?}",
-                                new_name, new_names[*id]
+                                new_name, new_names[id]
                             );
-                            instruction = &mut Instruction::Copy(new_name);
+                            instruction.data = InstructionData::Copy(new_name);
                         }
 
-                        Instruction::SetVariable(id, to_value) => {
+                        InstructionData::SetVariable(id, to_value) => {
                             println!("set var to id: {:?} and {:?}", id, to_value);
-                            new_names[*id] = Some(index);
-                            instruction = &mut Instruction::Copy(*to_value);
+                            new_names[id] = Some(instruction.id);
+                            instruction.data = InstructionData::Copy(to_value);
                         } // TODO: make it so that every use of variable will d this
                         // i think this might be enough? but idk
                         _ => {}
                     }
                     // index += 1;
-                }
+                });
+                // for (index, mut instruction) in block.instructions.iter_mut().enumerate() {
+                // index += 1;
+                // }
 
+                // let mut map_size = 0;
                 module.get_successors(block_id, |sucessor| {
-                    for (variable_id, map, _) in &mut phis[sucessor] {
+                    for (variable_id, map, map_id) in &mut phis[sucessor] {
                         // let mut entry = map.iter_mut().find(|from| from == sucessor).unwrap();
                         // for mut predecessor in map.iter() {
                         //     if predecessor == &sucessor {
@@ -773,6 +1079,8 @@ impl Module {
                             .find(|(from_block, _)| *from_block == block_id)
                             .unwrap();
                         entry.1 = Some(new_names[*variable_id].unwrap());
+                        // module.phi_instructions.push(map);
+                        // map_size += 1;
 
                         // entry = &mut new_names[*variable_id].unwrap()
                     }
@@ -791,6 +1099,16 @@ impl Module {
             let mut new_names = index_vec!(None; self.variables.len());
             visit(0, new_names, &mut phis, dominance_tree, self);
         }
+        println!("IN THE SSA THINGY");
+        for block in &self.blocks {
+            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
+            self.for_block(block.id, |instruction| {
+                println!(
+                    "      tjhe block {:?} instruction is {:?}",
+                    instruction.id, instruction.data
+                );
+            });
+        }
 
         // make phis have proper values
         {
@@ -804,170 +1122,159 @@ impl Module {
                         .map(|(from_block, instruction)| (*from_block, instruction.unwrap()))
                         .collect();
 
-                    // self.phi_instructions[instruction_id]
-
-                    println!("GOT BLOCK ID {:?}", block_id);
-                    if let Some(reference_id) = at {
-                        // append
-                        self.blocks[block_index]
-                            .instructions
-                            .insert(reference_id, Instruction::Phi(*block_id));
-                    } else {
-                        // prepend
-                        self.blocks[block_index]
-                            .instructions
-                            .insert(0, Instruction::Phi(*block_id));
-                    };
+                    println!(
+                        "GOT BLOCK ID {:?} AT IS {:?} INSTRUCTION ID {:?}",
+                        block_id, at, instruction_id
+                    );
+                    // {
+                    //     let InstructionData::Phi(mut map_id) =
+                    //         self.instructions[*instruction_id].data
+                    //     else {
+                    //         panic!()
+                    //     };
+                    //
+                    //     // self.phi_instructions.push(map);
+                    //     println!(
+                    //         "map id {:?} for instruction id {:?}",
+                    //         map_id, instruction_id
+                    //     );
+                    //     // TODO: mightr be a more efficient way than inserting
+                    //     self.phi_instructions.inner_mut().insert(map_id, map);
+                    //     // self.phi_instructions[map_id] = map;
+                    // }
+                    self.instructions[*instruction_id].data =
+                        InstructionData::Phi(self.phi_instructions.len());
+                    self.insert_instruction(block_index, at, *instruction_id);
+                    // self.phi_instructions.len()
+                    self.phi_instructions.push(map);
 
                     at = Some(*instruction_id);
-                    // self.blocks[*block_id]
-
-                    // self.blocks[*block_id]
-                    //     .instructions
-                    //     .insert(*instruction_id, Instruction::Phi(block_index)); // might need to
                 }
             }
         }
     }
 
-    // pub fn make_ssa(&mut self, dominance_frontier: IndexVec<usize, Vec<usize>>) {
-    //     // adding phi's
-    //     let phis = {
-    //         let mut visited = Vec::with_capacity(self.variable_definitions.len());
-    //         // let mut visited =
-    //         //     index_vec![index_vec![false; self.variables.len()]; self.blocks.len()];
-    //
-    //         // let mut stack = Vec::new();
-    //         //
-    //         // for block in self.blocks {
-    //         //     for instruction in block.instructions {
-    //         //         let Instruction::SetVariable(name, _) = instruction else {
-    //         //             continue;
-    //         //         };
-    //         //
-    //         //         if !visited[block.id][] {
-    //         //             visited
-    //         //         }
-    //         //     }
-    //         // }
-    //         //
-    //         for (variable_index, variable) in self.variables.iter().enumerate() {
-    //             // TODO: optimally, remove the clone
-    //             for blocks in self.variable_definitions[variable_index].clone() {
-    //                 for block in &dominance_frontier[blocks] {
-    //                     // maybe use a hashmap instead?
-    //                     if !visited.contains(block) {
-    //                         // add the phi instruction
-    //                         self.blocks[*block]
-    //                             .instructions
-    //                             .push(Instruction::Phi(*block));
-    //
-    //                         // self.blocks[*block].push(Instruction::Phi(*block));
-    //
-    //                         visited.push(*block);
-    //                         if self.variable_definitions.get(*block).is_some() {
-    //                             self.variable_definitions[variable_index].push(*block);
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //
-    //         visited
-    //     };
-    //
-    //     // renaming variables
-    //
-    //     {
-    //         fn parse_variable(mut stack: HashMap<String, usize>, mut instruction: Instruction) {
-    //             let Instruction::GetVariable(mut name) = instruction else {
-    //                 return;
-    //             };
-    //             // Instruction::GetVariable(mut name) => {
-    //             name.push_str(&stack.get(&name).unwrap_or(&0).to_string());
-    //             instruction = Instruction::GetVariable(name);
-    //             // }
-    //             // Instruction::SetVariable(mut name, mut value) => {
-    //             //     visit_instruction(block, stack, block.instructions[value]);
-    //             //     // name.push_str(&stack.get(&name).unwrap_or(&0).to_string());
-    //             //     instruction = Instruction::GetVariable(name.to_string());
-    //             // }
-    //         }
-    //
-    //         // just do this...
-    //         fn parse_value(
-    //             stack: &mut HashMap<String, usize>,
-    //             block: &mut Block,
-    //             phis: &Vec<usize>,
-    //             instruction: usize,
-    //         ) {
-    //             // need to traverse through every single itme that continues a statment!
-    //             // try to remove the clone in the future
-    //             match block.instructions[instruction].clone() {
-    //                 Instruction::Add(value_1, value_2) => {
-    //                     parse_value(stack, block, phis, value_1);
-    //                     parse_value(stack, block, phis, value_2);
-    //                 }
-    //                 Instruction::Subtract(value_1, value_2) => {
-    //                     parse_value(stack, block, phis, value_1);
-    //                     parse_value(stack, block, phis, value_2);
-    //                 }
-    //                 Instruction::GetVariable(mut name) => {
-    //                     // Instruction::GetVariable(mut name) => {
-    //                     name.push_str(&stack.get(&name).unwrap_or(&0).to_string());
-    //                     block.instructions[instruction] =
-    //                         Instruction::GetVariable(name.to_string());
-    //                 }
-    //                 Instruction::SetVariable(name, value) => {
-    //                     parse_value(stack, block, phis, value);
-    //                     if let Some(var) = stack.get_mut(&name) {
-    //                         *var += 1;
-    //                     } else {
-    //                         // mayeb dont clone?
-    //                         stack.insert(name.clone(), 1);
-    //                     }
-    //                     // TODO: make it so that it increments the name rthingy
-    //                     block.instructions[instruction] =
-    //                         Instruction::GetVariable(name + &value.to_string());
-    //                 }
-    //                 _ => {}
-    //             }
-    //
-    //             if instruction < block.instructions.len() {
-    //                 parse_value(stack, block, phis, instruction + 1);
-    //             }
-    //
-    //             // TODO: rewrite tihs so maybe it does it in the reverse order with predecessors?
-    //             // then all you need to track are predecesors
-    //             for successor in &block.successors {
-    //                 let test = 2 + 2;
-    //             }
-    //         }
-    //         let mut stack = HashMap::with_capacity(self.variables.len());
-    //         for block in &mut self.blocks {
-    //             parse_value(&mut stack, block, &phis, 0);
-    //         }
-    //
-    //         // fn visit(mut module: &mut Module, mut block: Block, mut stack: HashMap<String, usize>) {
-    //         // for instruction in block.instructions {
-    //         // parse_value(&mut stack, &mut block.instructions, 0);
-    //         //     match instruction {
-    //         //         Instruction::GetVariable(_) => parse_variable(stack, instruction),
-    //         //         Instruction::SetVariable(mut name, mut value) => {
-    //         //             // visit_instruction(block, stack, block.instructions[value]);
-    //         //             // name.push_str(&stack.get(&name).unwrap_or(&0).to_string());
-    //         //             instruction = Instruction::GetVariable(name.to_string());
-    //         //         }
-    //         //         _ => continue,
-    //         //     }
-    //         //     // visit_instruction(block, stack.clone(), instruction);
-    //         // }
-    //         // }
-    //     }
-    // }
-}
+    pub fn copy_propogation(&mut self, dominance_tree: &IndexVec<usize, Vec<usize>>) {
+        fn visit(
+            block_id: usize,
+            module: &mut Module,
+            dominance_tree: &IndexVec<usize, Vec<usize>>,
+        ) {
+            module.block_replace_args(block_id, |new_module, instruction_id| {
+                if let InstructionData::Copy(source) = new_module.instructions[*instruction_id].data
+                {
+                    println!(
+                        "i see source {:?} for instruction id {:?}",
+                        source, instruction_id
+                    );
+                    let mut new_arguments = source;
+                    while let InstructionData::Copy(source) =
+                        new_module.instructions[new_arguments].data
+                    {
+                        new_arguments = source;
+                    }
+                    println!("      new instruction id {:?}", new_arguments);
 
-// pub fn make_ssa(module: Module) {
-//     // insert phi's
-//     let mut phis = {};
-// }
+                    *instruction_id = new_arguments;
+                }
+            });
+
+            for dominated in dominance_tree[block_id].iter() {
+                visit(*dominated, module, dominance_tree);
+            }
+            // module.for_block_mut(block_id, |instruction| {});
+        }
+
+        visit(0, self, dominance_tree);
+
+        println!("ok within this thing lets see ||||||| ");
+
+        for block in &self.blocks {
+            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
+            self.for_block(block.id, |instruction| {
+                println!(
+                    "      tjhe block {:?} instruction is {:?}",
+                    instruction.id, instruction.data
+                );
+                // index += 1;
+            });
+            // println!("          succesors length {:?}", block.successors);
+            // for predl in &block.predecessors {
+            //     println!("      BLOCK {:?} HAS PREDECESSOR {:?}", block.id, predl);
+            // }
+            // for predl in &block.successors {
+            //     println!("      BLOCK {:?} HAS SUCESSOR {:?}", block.id, predl);
+            // }
+        }
+
+        for phi in &self.phi_instructions {
+            println!("theres a phi instruction! {:?}", phi);
+        }
+    }
+
+    pub fn dead_copy_elimination(&mut self) {
+        let mut visited = index_vec![false; self.instructions.len()];
+        self.all_args(|argument| {
+            println!("visited {:?}", argument);
+            visited[argument] = true;
+        });
+
+        for block_id in 0..self.blocks.len() {
+            let mut current_block = self.blocks[block_id].start;
+            // let mut at = current_block.start;
+
+            while let Some(instruction_id) = current_block {
+                let instruction = &self.instructions[instruction_id];
+                let next = instruction.next;
+                println!(
+                    "checking {:?} and {:?} the data {:?}",
+                    instruction_id, visited[instruction_id], instruction.data
+                );
+                if !visited[instruction_id] {
+                    if let InstructionData::Copy(source) = instruction.data {
+                        // let source_value = core::mem::take(&mut source.)
+                        println!("removing copy {:?}", instruction_id);
+                        self.remove_instruction(instruction_id);
+                    }
+                }
+
+                current_block = next;
+            }
+        }
+    }
+
+    // convert to conventional ssa form
+    pub fn convert_to_cssa(&mut self, predecessors: &IndexVec<usize, IndexVec<usize, usize>>) {
+        let mut predecessor_copy_ids = index_vec![None; self.blocks.len()];
+
+        // for block_id in 0..self.bl {
+        //
+        // }
+        let mut last_parrallel_id = 0;
+        for block in &self.blocks {
+            if let InstructionData::Phi(first_phi) = self.instructions[block.start.unwrap()].data {
+                let phi_parralel_copy = last_parrallel_id;
+                last_parrallel_id += 1;
+
+                for predecessor in &predecessors[block.id] {
+                    predecessor_copy_ids[*predecessor] = Some(last_parrallel_id);
+                    last_parrallel_id += 1;
+                }
+
+                let mut old_phi = Some(first_phi);
+                while let Some(at) = old_phi {
+                    let map = &mut self.phi_instructions[at];
+
+                    // parallel copies for each predecessor
+                    // let mut phi_map = phima
+                    for (predecessor, source) in map {
+                        let copy_id = predecessor_copy_ids[*predecessor].unwrap();
+                        let copy =
+                            self.new_instruction(InstructionData::ParallelCopy(*source, copy_id));
+                    }
+                }
+                // let mut new_phi_cursor
+            }
+        }
+    }
+}

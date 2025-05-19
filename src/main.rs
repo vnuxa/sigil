@@ -3,7 +3,7 @@
 use index_vec::{IndexVec, index_vec};
 // use bytecode::main::VM;
 use interpreter::{
-    codegen::{Block, Instruction, Module},
+    codegen::{Block, Instruction, InstructionData, Module},
     parser::generate,
 };
 //
@@ -39,8 +39,8 @@ local asd = test + 5
     let syntax_tree = generate(input);
     let mut ir = Module::new();
     ir.new_block();
-    // let mut block = &mut ir.blocks[0];
-    let mut block = ir.blocks[0].clone();
+    // let mut block = &mut ir.blocks[0].clone();
+    // let mut block = ir.blocks[0];
     let mut block_id = 0;
     for expression in syntax_tree {
         println!("block id {:?}", block_id);
@@ -48,7 +48,7 @@ local asd = test + 5
         //     "!!!!!!! PARSER OUTPUT {:?}",
         //     ir.build_instruction(&mut block, expression)
         // )
-        if let Some(new_block) = ir.build_instruction(&mut block, expression) {
+        if let Some(new_block) = ir.build_instruction(block_id, expression) {
             // if new_block.len {
             //
             // }
@@ -59,10 +59,10 @@ local asd = test + 5
                 "current block id {:?} and then changing it to a new one {:?}",
                 block_id, new_block
             );
-            println!(
-                "!!? instructions: {:?}",
-                ir.blocks[if block_id == 0 { 0 } else { block_id - 1 }].instructions
-            );
+            // println!(
+            //     "!!? instructions: {:?}",
+            //     ir.blocks[if block_id == 0 { 0 } else { block_id - 1 }].instructions
+            // );
             // block.instructions);
 
             // if block_id > 0 {
@@ -77,47 +77,83 @@ local asd = test + 5
             // }
             // block_id = new_block;
             // if !block.instructions.is_empty() {
-            ir.blocks[block_id] = block;
+            // println!("block {:?} end: {:?}", block_id, ir.blocks[block_id].end);
+            // if let Some(last) = ir.blocks[block_id].end {
+            //     println!("it has end! {:?}", block_id);
+            //     match ir.instructions[last].data {
+            //         // ignore
+            //         InstructionData::Jump(_) | InstructionData::JumpConditional(_, _, _) => {}
+            //         InstructionData::EndOfFile => {}
+            //         // add/remove instructions
+            //         _ => {
+            //             ir.add_instruction(new_block, InstructionData::Jump(new_block + 1));
+            //             // ir.insert_instruction(, reference, instruction_id);
+            //             // add jump instruction
+            //             // scope.instructions.push(InstructionData::Jump(scope.id + 1));
+            //         }
+            //     }
+            // }
             block_id = new_block;
-            block = ir.blocks[new_block].clone();
+            // ir.blocks[block_id] = block;
+            // block_id = new_block;
+            // block = &mut ir.blocks[new_block].clone();
             // }
         }
     }
-    ir.blocks[block_id] = block;
+    // ir.blocks[block_id] = block;
+    //
+    // ir.blocks
+    //     .last_mut()
+    //     .unwrap()
+    //     .instructions
+    //     .push(interpreter::codegen::Instruction::EndOfFile);
+    ir.add_instruction(ir.blocks.last().unwrap().id, InstructionData::EndOfFile);
 
-    ir.blocks
-        .last_mut()
-        .unwrap()
-        .instructions
-        .push(interpreter::codegen::Instruction::EndOfFile);
-
-    for scope in &mut ir.blocks {
-        match scope.instructions.last() {
-            // ignore
-            Some(Instruction::Jump(_) | Instruction::JumpConditional(_, _, _)) => {}
-            Some(Instruction::EndOfFile) => {}
-            // add/remove instructions
-            Some(_) => {
-                // add jump instruction
-                scope.instructions.push(Instruction::Jump(scope.id + 1));
+    for scope in ir.blocks.clone() {
+        if let Some(scope_last) = scope.end {
+            match ir.instructions[scope_last].data {
+                // ignore
+                InstructionData::Jump(_) | InstructionData::JumpConditional(_, _, _) => {}
+                InstructionData::EndOfFile => {}
+                // add/remove instructions
+                _ => {
+                    ir.add_instruction(scope.id, InstructionData::Jump(scope.id + 1));
+                    // ir.insert_instruction(, reference, instruction_id);
+                    // add jump instruction
+                    // scope.instructions.push(InstructionData::Jump(scope.id + 1));
+                }
             }
-            None => {
-                scope.instructions.push(Instruction::Jump(scope.id + 1));
-                // remove block
-            }
+        } else {
+            ir.add_instruction(scope.id, InstructionData::Jump(scope.id + 1));
         }
+
+        // match scope.instructions.last() {
+        //     // ignore
+        //     Some(InstructionData::Jump(_) | InstructionData::JumpConditional(_, _, _)) => {}
+        //     Some(InstructionData::EndOfFile) => {}
+        //     // add/remove instructions
+        //     Some(_) => {
+        //         // add jump instruction
+        //         scope.instructions.push(InstructionData::Jump(scope.id + 1));
+        //     }
+        //     None => {
+        //         scope.instructions.push(InstructionData::Jump(scope.id + 1));
+        //         // remove block
+        //     }
+        // }
     }
 
     // TODO: probably not use clone?
     // ir.blocks[0] = block;
     for block in &ir.blocks {
-        println!("im in block: {:?}", block.id);
-        for (index, instruction) in block.instructions.iter().enumerate() {
+        println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
+        ir.for_block(block.id, |instruction| {
             println!(
                 "      tjhe block {:?} instruction is {:?}",
-                index, instruction
+                instruction.id, instruction.data
             );
-        }
+            // index += 1;
+        });
         // println!("          succesors length {:?}", block.successors);
         // for predl in &block.predecessors {
         //     println!("      BLOCK {:?} HAS PREDECESSOR {:?}", block.id, predl);
@@ -127,6 +163,7 @@ local asd = test + 5
         // }
     }
 
+    println!("ok im done with that");
     let predecessors = ir.get_predecessors();
     // let dominance = IndexVec::with_capacity(ir.blocks.len());
     // let mut dominance = index_vec![Vec::new(); ir.blocks.len()];
@@ -151,15 +188,35 @@ local asd = test + 5
     let tree = ir.make_dominance_tree(dominance);
     ir.make_ssa(frontier, &tree, &predecessors);
 
+    ir.copy_propogation(&tree);
+    ir.dead_copy_elimination();
     println!("||||");
+    // for block in &ir.blocks {
+    //     println!("im in block: {:?}", block.id);
+    //     for (index, instruction) in block.instructions.iter().enumerate() {
+    //         println!(
+    //             "      tjhe block {:?} instruction is {:?}",
+    //             index, instruction
+    //         );
+    //     }
+    // }
+    //
     for block in &ir.blocks {
-        println!("im in block: {:?}", block.id);
-        for (index, instruction) in block.instructions.iter().enumerate() {
+        println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
+        ir.for_block(block.id, |instruction| {
             println!(
                 "      tjhe block {:?} instruction is {:?}",
-                index, instruction
+                instruction.id, instruction.data
             );
-        }
+            // index += 1;
+        });
+        // println!("          succesors length {:?}", block.successors);
+        // for predl in &block.predecessors {
+        //     println!("      BLOCK {:?} HAS PREDECESSOR {:?}", block.id, predl);
+        // }
+        // for predl in &block.successors {
+        //     println!("      BLOCK {:?} HAS SUCESSOR {:?}", block.id, predl);
+        // }
     }
 
     for phi in ir.phi_instructions {
