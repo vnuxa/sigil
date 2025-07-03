@@ -1,26 +1,35 @@
+use std::clone;
+
+
+
+
 #[derive(Debug, PartialEq)]
 pub enum Opcode {
     // Halt,
-    Load,
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Jump,
-    RelativeJumpForward,
-    RelativeJumpBackward,
-    Equal,
-    NotEqual,
-    GreaterThan,
-    LessThan,
-    GreaterThanOrEqual,
-    LessThanOrEqual,
-    JumpIfEqual,
-    JumpIfNotEqual,
-    Allocate,
-    Free,
-    Print,
-    Illegal,
+    Load = 1,
+    Add = 2,
+    Subtract = 3,
+    Multiply = 4,
+    Divide = 5,
+    Remainder = 20,
+    Jump = 6,
+    RelativeJumpForward = 7,
+    RelativeJumpBackward = 8,
+    Equal = 9,
+    NotEqual = 10,
+    GreaterThan = 11,
+    LessThan = 12,
+    GreaterThanOrEqual = 13,
+    LessThanOrEqual = 14,
+    JumpIfEqual = 15,
+    JumpConditional = 16,
+    Allocate = 17,
+    Free = 18,
+    Print = 19,
+    CallFunction = 21,
+    Return = 22,
+    Closure = 23,
+    Illegal = 99,
 }
 
 impl From<u8> for Opcode {
@@ -32,6 +41,7 @@ impl From<u8> for Opcode {
             3 => Opcode::Subtract,
             4 => Opcode::Multiply,
             5 => Opcode::Divide,
+            20 => Opcode::Remainder,
             6 => Opcode::Jump,
             7 => Opcode::RelativeJumpForward,
             8 => Opcode::RelativeJumpBackward,
@@ -42,31 +52,76 @@ impl From<u8> for Opcode {
             13 => Opcode::GreaterThanOrEqual,
             14 => Opcode::LessThanOrEqual,
             15 => Opcode::JumpIfEqual,
-            16 => Opcode::JumpIfNotEqual,
+            16 => Opcode::JumpConditional,
             17 => Opcode::Allocate,
             18 => Opcode::Free,
             19 => Opcode::Print,
-            _ => Opcode::Illegal,
+            21 => Opcode::CallFunction,
+            22 => Opcode::Return,
+            23 => Opcode::Closure,
+            e => { println!("Illegal {:?}", e); Opcode::Illegal },
         }
     }
+}
+
+pub struct Thread {
+
+}
+
+pub struct CallFrame {
+    pub function: usize,
+    // used for returns
+    pub origin_pc: usize,
+    // where allocating registers begin for this callfame
+    pub base: usize,
+    pub internal_counter: usize,
+    pub instructions: Vec<Opcode>
+}
+
+#[derive(Clone)]
+pub struct FunctionPrototype {
+    pub instructions: Vec<u8>,
+    pub internal_counter: usize,
+    // the minimum register where the function lives at
+    pub base: usize,
+
+    pub number_params: usize,
+
+    // will be initialized with params
+    pub locals: Vec<u8>,
+
+
+}
+
+#[derive(Clone, Debug)]
+pub enum SigilTypes {
+    Number(i32),
+    Function(i32), // function id
+}
+
+pub struct Upvalue {
+    pub register_refrence: usize,
 }
 
 pub struct VM {
     // array that simulates hardware registers
     // TODO: maybe replace this with a vec in the future, and maybe change the i32 to a i64
-    registers: Vec<i32>,
+    pub registers: Vec<SigilTypes>,
+    // a list of active call frames
+    pub call_frames: Vec<CallFrame>,
+    pub functions: Vec<FunctionPrototype>,
+    // upvalues, which are refrences to values
+    upvalues: Vec<Upvalue>,
     // to store global variables
     global_registers: Vec<i32>,
     // program counter that keeps track of which byte is being executed
     program_counter: usize,
     // all of the bytes to execute
-    program: Vec<u8>,
+    pub program: Vec<u8>,
     // used to calculate the remainder for the divisional operator
     remainder: u32,
     // contains the result of the last comparison operator
     equal_flag: bool,
-    // heap
-    heap: Vec<u8>,
 }
 
 impl VM {
@@ -74,145 +129,208 @@ impl VM {
         VM {
             // registers: [0; 32],
             registers: Vec::new(),
+            functions: Vec::new(),
             global_registers: Vec::new(),
             program_counter: 0,
             program: Vec::new(),
             remainder: 0,
             equal_flag: false,
-            heap: Vec::new(),
+            upvalues: Vec::new(),
+            call_frames: Vec::new(),
         }
     }
 
-    pub fn run(&mut self) {
-        while !self.execute_instruction() {}
+    // pub fn run(&mut self) {
+    //     while !self.execute_instruction() {}
+    // }
+
+    pub fn execute_function(&mut self, function_id: usize) {
+        let mut function = self.functions[function_id].clone();
+
+        while !self.execute_instruction(&mut function.internal_counter, &mut function.instructions) {}
+
+        // NOTE: find a better solution than cloning!
+        self.functions[function_id] = function;
     }
 
-    pub fn execute_instruction(&mut self) -> bool {
-        if self.program_counter > self.program.len() {
+    pub fn execute_instruction(&mut self, program_counter: &mut usize, program: &mut Vec<u8>) -> bool {
+        println!("{:?} > {:?}",program_counter, program.len());
+        if *program_counter > program.len() - 1 {
             return true;
         }
 
-        match self.decode_opcode() {
-            // Opcode::Halt => {
-            //     println!("Halt encountered!");
-            //     return false;
-            // }
+        let decoded_opcode = self.decode_opcode(program, program_counter);
+        println!("handling {:?}", decoded_opcode);
+        match decoded_opcode {
             Opcode::Load => {
-                let register = self.next_8_bits() as usize;
-                let number = self.next_16_bits() as i32;
-                self.registers[register] = number;
+                let number = self.next_8_bits(program, program_counter) as i32;
+                let register = self.next_8_bits(program, program_counter) as usize;
+                self.registers[register] = SigilTypes::Number(number);
 
                 return false;
             }
             Opcode::Add => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_id_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_2 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_3 = self.next_8_bits(program, program_counter) as usize;
 
-                self.registers[self.next_8_bits() as usize] = register_1 + register_2;
+                // IMPORTANT: IMPROVE THE ERROR SYSTEM TO SHOW EXACTLY WHERE THE ERROR IS!!
+                let SigilTypes::Number(first_value) = self.registers[register_id_1] else { panic!("Expected a number value within register {:?}", register_id_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_id_2] else { panic!("Expected a number value within register {:?}", register_id_2) };
+                self.registers[register_id_3] = SigilTypes::Number(first_value + second_value);
+                // self.registers[register_id_3] = self.registers[register_id_1] + self.registers[register_id_2];
             }
             Opcode::Subtract => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_id_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_2 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_3 = self.next_8_bits(program, program_counter) as usize;
 
-                self.registers[self.next_8_bits() as usize] = register_1 - register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_id_1] else { panic!("Expected a number value within register {:?}", register_id_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_id_2] else { panic!("Expected a number value within register {:?}", register_id_2) };
+                self.registers[register_id_3] = SigilTypes::Number(first_value - second_value);
+                // self.registers[register_id_3] = self.registers[register_id_1] - self.registers[register_id_2];
             }
             Opcode::Multiply => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_id_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_2 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_3 = self.next_8_bits(program, program_counter) as usize;
 
-                self.registers[self.next_8_bits() as usize] = register_1 * register_2;
+
+                let SigilTypes::Number(first_value) = self.registers[register_id_1] else { panic!("Expected a number value within register {:?}", register_id_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_id_2] else { panic!("Expected a number value within register {:?}", register_id_2) };
+                self.registers[register_id_3] = SigilTypes::Number(first_value * second_value);
+                // self.registers[register_id_3] = self.registers[register_id_1] * self.registers[register_id_2];
             }
             Opcode::Divide => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_id_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_2 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_3 = self.next_8_bits(program, program_counter) as usize;
 
-                self.registers[self.next_8_bits() as usize] = register_1 / register_2;
-                self.remainder = (register_1 % register_2) as u32;
+                let SigilTypes::Number(first_value) = self.registers[register_id_1] else { panic!("Expected a number value within register {:?}", register_id_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_id_2] else { panic!("Expected a number value within register {:?}", register_id_2) };
+                self.registers[register_id_3] = SigilTypes::Number(first_value / second_value);
+                // self.registers[register_id_3] = self.registers[register_id_1] / self.registers[register_id_2];
+            }
+            Opcode::Remainder => {
+                let register_id_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_2 = self.next_8_bits(program, program_counter) as usize;
+                let register_id_3 = self.next_8_bits(program, program_counter) as usize;
+
+                let SigilTypes::Number(first_value) = self.registers[register_id_1] else { panic!("Expected a number value within register {:?}", register_id_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_id_2] else { panic!("Expected a number value within register {:?}", register_id_2) };
+                self.registers[register_id_3] = SigilTypes::Number(first_value % second_value);
+                // self.registers[register_id_3] = self.registers[register_id_1] % self.registers[register_id_2];
             }
             Opcode::Jump => {
-                let target = self.registers[self.next_8_bits() as usize];
+                let target = self.next_8_bits(program, program_counter) as usize;
 
-                self.program_counter = target as usize;
+                // IMPORTANT: this should probably just be directly target, no need for getting it
+                // in register
+                *program_counter = target;
             }
-            Opcode::RelativeJumpForward => {
-                let value = self.registers[self.next_8_bits() as usize];
-                self.program_counter += value as usize;
-            }
-            Opcode::RelativeJumpBackward => {
-                let value = self.registers[self.next_8_bits() as usize];
-                self.program_counter -= value as usize;
-            }
-
             Opcode::Equal => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 == register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value == second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::NotEqual => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 != register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value != second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::GreaterThan => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 > register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value > second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::LessThan => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 < register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value < second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::GreaterThanOrEqual => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 >= register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value >= second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::LessThanOrEqual => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                let register_2 = self.registers[self.next_8_bits() as usize];
+                let register_1 = self.next_8_bits(program, program_counter) as usize;
+                let register_2 = self.next_8_bits(program, program_counter) as usize;
 
-                self.equal_flag = register_1 <= register_2;
+                let SigilTypes::Number(first_value) = self.registers[register_1] else { panic!("Expected a number value within register {:?}", register_1) };
+                let SigilTypes::Number(second_value) = self.registers[register_2] else { panic!("Expected a number value within register {:?}", register_2) };
+                self.equal_flag = first_value <= second_value;
 
-                self.next_8_bits();
+                self.next_8_bits(program, program_counter);
             }
             Opcode::JumpIfEqual => {
                 if self.equal_flag {
-                    self.program_counter = self.registers[self.next_8_bits() as usize] as usize;
+                    let target = self.next_8_bits(program, program_counter) as usize;
+                    *program_counter = target;
                 }
             }
-            Opcode::JumpIfNotEqual => {
-                if !self.equal_flag {
-                    self.program_counter = self.registers[self.next_8_bits() as usize] as usize;
+            Opcode::JumpConditional => {
+                let target_true = self.next_8_bits(program, program_counter) as usize;
+                let target_false = self.next_8_bits(program, program_counter) as usize;
+                println!("WITHIN JUMPCONDITIONAL {:?} {:?}", target_true, target_false);
+                println!("EQUAL FLAG IS {:?}", self.equal_flag);
+                if self.equal_flag {
+                    // let target = self.next_8_bits() as usize;
+                    *program_counter = target_true;
+                } else {
+                    *program_counter = target_false;
                 }
-            }
-            Opcode::Allocate => {
-                let bytes = self.registers[self.next_8_bits() as usize] as usize;
-                self.heap.resize(self.heap.len() + bytes, 0);
-            }
-            Opcode::Free => {}
-            Opcode::Print => {
-                let register_1 = self.registers[self.next_8_bits() as usize];
-                println!("{:?}", register_1);
-            }
 
-            _ => {
-                println!("Unkown opcode");
+            }
+            // Opcode::Allocate => {
+            //     let bytes = self.registers[self.next_8_bits() as usize] as usize;
+            //     self.heap.resize(self.heap.len() + bytes, 0);
+            // }
+            // Opcode::Free => {}
+            Opcode::Print => {
+                let register_id = self.next_8_bits(program, program_counter) as usize;
+                // let register = self.registers[self.next_8_bits() as usize];
+                println!(";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; OUTPUT OF A PRINT: {:?} IT HAS REGISTER ID {:?}", self.registers[register_id], register_id);
+            }
+            Opcode::CallFunction => {
+                let function_register = self.next_8_bits(program, program_counter) as usize;
+                // IMPORTANT: MAKE PROPER ERROR SYSTEM!
+                let SigilTypes::Function(function_id) = self.registers[function_register] else { panic!("not a function in register: {:?}", function_register) };
+
+                self.execute_function(function_id as usize);
+            }
+            Opcode::Closure => {
+                let number = self.next_8_bits(program, program_counter) as i32;
+                let register = self.next_8_bits(program, program_counter) as usize;
+                self.registers[register] = SigilTypes::Function(number);
+            }
+            e => {
+                // println!("Unkown opcode {:?}", e as u8);
             }
         }
 
@@ -220,20 +338,22 @@ impl VM {
     }
 
     // primarily used in tests
-    pub fn run_once(&mut self) {
-        self.execute_instruction();
-    }
+    // pub fn run_once(&mut self) {
+    //     self.execute_instruction();
+    // }
 
-    fn decode_opcode(&mut self) -> Opcode {
-        let opcode = Opcode::from(self.program[self.program_counter]);
-        self.program_counter += 1;
+    fn decode_opcode(&mut self, program: &mut Vec<u8>, program_counter: &mut usize) -> Opcode {
+        println!("on program counter {:?}", program_counter);
+        println!("program: {:?}", program[*program_counter]);
+        let opcode = Opcode::from(program[*program_counter]);
+        *program_counter += 1;
 
         opcode
     }
 
-    fn next_8_bits(&mut self) -> u8 {
-        let result = self.program[self.program_counter];
-        self.program_counter += 1;
+    fn next_8_bits(&mut self,  program: &mut Vec<u8>, program_counter: &mut usize) -> u8 {
+        let result = program[*program_counter];
+        *program_counter += 1;
         result
     }
 

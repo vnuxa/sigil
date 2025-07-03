@@ -32,6 +32,7 @@ pub enum Expressions {
     Access(Box<Expressions>, Box<Expressions>),
     Index(Box<Expressions>, Box<Expressions>), // objeect, index
     CallFunction(Box<Expressions>, Vec<Expressions>), // function name, function params
+    FunctionBlock(Box<Expressions>, Vec<Expressions>, Box<Expressions>), // name, variable arguments, scope
 
     Assign(String, Box<Expressions>), // Variable, value
     Scope(Vec<Expressions>),
@@ -39,6 +40,7 @@ pub enum Expressions {
 
     EndOfFile,
     ScopeEnd,
+    ParanthesesEnd
 }
 
 #[derive(Logos, Debug, PartialEq, Eq, Hash, Clone)]
@@ -169,6 +171,9 @@ enum Tokens {
 
     #[token("\"", string_definition)]
     String(String),
+
+    #[token("fn")]
+    FunctionDefinition,
 
     EndOfFile,
 }
@@ -333,7 +338,10 @@ fn can_continue(token: Tokens) -> bool {
 // NOTE: figuere out hwo to amke it so that string concatination can work with all of this
 fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
     // might want end of file handling here?
-    let mut left_hand_side = match tokens.pop() {
+    let test = tokens.pop();
+    println!("parsing {:?}", test);
+    // let mut left_hand_side = match tokens.pop() {
+    let mut left_hand_side = match test {
         Some(Tokens::Integer(number)) => Expressions::Int(number),
         Some(Tokens::Variable(var)) => Expressions::Variable(var),
         Some(Tokens::Bool(value)) => Expressions::Bool(value),
@@ -411,6 +419,7 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
             Expressions::Scope(expressions)
         }
         Some(Tokens::ScopeClose) => Expressions::ScopeEnd,
+        Some(Tokens::ParenthesesClose) => Expressions::ParanthesesEnd,
         Some(Tokens::If) => {
             let value = parser(tokens, 0);
             println!("the value for if is {:?}", value);
@@ -419,6 +428,33 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
             println!("Scope is: {:?}", scope);
 
             Expressions::If(Box::new(value), Box::new(scope))
+        }
+        Some(Tokens::FunctionDefinition) => {
+            let name = if let Some(Tokens::Variable(name)) = tokens.pop() {
+                name
+            } else {
+                // NOTE: make it so that there can be anonymous functions
+                panic!("Function has no name!")
+            };
+
+
+            let mut arguments = Vec::new();
+            // TODO: error checking here!, this next instruction ahs to be prantheses open
+            tokens.pop();
+            // let expression = parser(tokens, 0);
+            loop {
+                let expression = parser(tokens, 0);
+
+                if let Expressions::ParanthesesEnd = expression {
+                    break;
+                }
+
+                arguments.push(expression);
+            }
+
+            let scope = parser(tokens, 0);
+
+            Expressions::FunctionBlock(Box::new(Expressions::Variable(name)), arguments, Box::new(scope))
         }
         Some(Tokens::String(value)) => {
             // tokens.pop().unwrap();
@@ -438,6 +474,7 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
             Expressions::String(value)
         }
         None => Expressions::EndOfFile,
+        // Some(Tokens::ParenthesesClose) => Expressions::EndOfFile,
         e => panic!("not handled: {:?}", e),
     };
 
@@ -476,11 +513,21 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
                 let mut right_side = Vec::new();
 
                 // should check if there is a variable
-                right_side.push(parser(tokens, 0));
+                let token = parser(tokens, 0);
+                if let Expressions::ParanthesesEnd = token  {
+                    return Expressions::from_tokens(operator, Some(left_hand_side), None, Some(right_side));
+                }
+                right_side.push(token);
+
 
                 while let Some(Tokens::Comma) = tokens.pop() {
-                    right_side.push(parser(tokens, 0));
+                    let token = parser(tokens, 0);
+                    if let Expressions::ParanthesesEnd = token  {
+                        return Expressions::from_tokens(operator, Some(left_hand_side), None, Some(right_side) );
+                    }
+                    right_side.push(token);
                 }
+                println!("left hand side is {:?} and right side is {:?}", left_hand_side, right_side );
 
                 // TODO: make it so that once it recognizes a , it will continue and add more
                 Expressions::from_tokens(operator, Some(left_hand_side), None, Some(right_side))
