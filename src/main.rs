@@ -2,13 +2,14 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use bytecode::main::{FunctionPrototype, VM};
+use bytecode::main::{FunctionPrototype, VM, CallFrame};
 use index_vec::{IndexVec, index_vec};
 // use bytecode::main::VM;
 use interpreter::{
-    codegen::{Block, Functions, Instruction, InstructionData, Module},
     parser::generate,
 };
+
+use crate::interpreter::codegen2::{BlockFrame, Functions, InstructionData, Module};
 //
 mod bytecode;
 mod index_vec;
@@ -23,409 +24,177 @@ fn main() {
     // language.run();
     let input = "
 
-local test = 2 + 4 + 9
-if test == 15 {
-    test = 3
+local test = 2 + 4
+
+fn test_func() {
+    fn new_func() {
+        test = 1
+    }
+
+    new_func()
+    if test == 2 {
+        test = 7
+    }
 }
 
+test_func()
 print(test)
 
-fn new_thing() {
-    local new_var = 10
-    new_var = new_var + 10
-    print(new_var)
-}
-
-new_thing()
 
 
 "
     .to_string();
 
+    // nwo the problem is in  the compield byteciode
+    // in the compiuled bytecode whewn there si a jumpifueqal instruction it iwll nto work becausze
+    // there is no other block to jumop to so bnecause of htat it will just move forwar5df and the
+    // condiitioonal will be ignored and if there was a function it will not be follow3ed
+    // i need to find a way how ot makle it so that i could make it where the program ocunter of
+    // the jumpcifequal if iti wasnt equal wit qwikll be added so that this
     let syntax_tree = generate(input);
     let mut ir = Module::new();
-
-    let mut functions: IndexVec<usize, Functions> = IndexVec::new();
-    // functions.push();
     let mut first_function = Functions {
         name: None,
-        variables: IndexVec::new(),
-        // instructions: IndexVec::new(),
-        upvalues: Vec::new(),
-        phi_instructions: IndexVec::new(),
-        instructions: IndexVec::new(),
-        blocks: Vec::new(),
+        frame: BlockFrame::new(0, None),
+        upindex_amount: 0,
+        definition_id: 0,
+        id: 0,
+        predecessor_block: None,
+        predecessor_function: None,
     };
-    {
-        let main_function = &mut first_function;
-        ir.new_block(&mut main_function.blocks, None);
-
-        let mut block_id = 0;
-        let mut function_id = 0;
-        for expression in &syntax_tree {
-            println!("block id {:?}", block_id);
-            // println!(
-            //     "!!!!!!! PARSER OUTPUT {:?}",
-            //     ir.build_instruction(&mut block, expression)
-            // )
-            let mut main_data = InstructionData::Unimplemented;
-            let built_instruction = ir.build_instruction(
-                &mut main_function.variables,
-                &mut main_function.instructions,
-                &mut main_function.blocks,
-                block_id,
-                expression.clone(),
-                &mut |new_function| {
-                    functions.push(new_function);
-                    functions.len()
+    ir.variables.push(IndexVec::new());
+    ir.new_block(&mut first_function.frame.blocks, None);
+    ir.functions.push(first_function);
+    let mut block_id = 0;
+    for expresion in syntax_tree {
+        let mut first_frame = ir.functions[0].frame.clone();
+        // let block = first_frame.blocks.len() - 1;
+        if let Some(new_block) =  ir.build_expression(expresion, &mut first_frame, block_id) {
+            println!("----- changing block id {:?} to {:?}", block_id, new_block);
+            let last_new_block_instruction = first_frame.blocks[new_block - 1].end.unwrap();
+            match first_frame.instructions[last_new_block_instruction].data {
+                InstructionData::JumpConditional(_ ,_ ,_) | InstructionData::Jump(_) => {},
+                _ => {
+                    Module::add_instruction(&mut first_frame, new_block - 1, InstructionData::Jump(new_block));
                 }
+            }
+            block_id = new_block;
+        }
+        ir.functions[0].frame = first_frame;
+    }
+    for function in &ir.functions {
+        println!("func: {:?} ok so instructions for block: ALSO predecessor {:?}", function.id, function.predecessor_function);
+        for block in &function.frame.blocks {
+            let mut at = block.start;
+            println!("ok block starts with: {:?}", at);
+            while let Some(id) = at {
+                let instruction = &function.frame.instructions[id];
+                at = instruction.next;
+                println!("      the {:?} instruction is {:?} in block {:?}", instruction.id, instruction.data, instruction.block);
 
-            );
-            println!("ok after adding the blocks for function 0 should be {:?}", main_function.blocks.len()
+            }
+            println!("ok block ends with: {:?}", at);
+        }
+    }
+    let mut frontiers = IndexVec::with_capacity(ir.functions.len());
+    for function in &ir.functions {
+        frontiers.push(index_vec![None; function.frame.blocks.len()]);
+    }
 
-            );
-            //     , &mut |id, data| {
-            //     // ir.add_instruction(id, data, 0);
-            //     main_id = id;
-            //     main_data = data;
-            //     // add instruction in main as the instructions that are within other functions are
-            //     // being handled by the build instruction function within the functionblock cqase
-            // });
-            // IMPORTANT: make it so that it will not only post this instruction to the main function
-            // maybe?
-            // ir.add_instruction(main_id, main_data, 0);
-            if let Some(new_block) = built_instruction {
-                println!(
-                    "current block id {:?} and then changing it to a new one {:?}",
-                    block_id, new_block
-                );
-                block_id = new_block;
+    ir.dominance_frontier(&ir.functions[0].frame, 0, &mut frontiers);
+    for (index, function) in frontiers.iter().enumerate() {
+        println!("frontier function {:?}", index);
+        for (block_index, block) in function.iter().enumerate() {
+            println!("      function block: {:?} with value: {:?}", block_index, block);
+        }
+    }
+    let mut first_frame = ir.functions[0].frame.clone();
+    let ssa = ir.make_ssa(&mut first_frame, frontiers);
+    for function in &ir.functions {
+        println!(" funcc {:?} ok so instructions for block:", function.id);
+        for block in &function.frame.blocks {
+            let mut at = block.start;
+            println!("ok block starts with: {:?} ends {:?}", at, block.end);
+            while let Some(id) = at {
+                let instruction = &function.frame.instructions[id];
+                at = instruction.next;
+                println!("      the {:?} instruction is {:?} in block {:?}", instruction.id, instruction.data, instruction.block);
             }
         }
     }
-    println!("ok after loop it now is {:?} and its index is {:?}", first_function.blocks.len(), functions.len());
-    functions.push(first_function);
-    println!("----------------------------------------------------------------- THE FIRST FUNCTIONS ITER WAS DONE");
-    // let mut loop_functions = rc_functions.clone();
-    // let main_function = &mut ir.functions[0];
-    // 0 is main function
-    // let mut block = &mut ir.blocks[0].clone();
-    // let mut block = ir.blocks[0];
-    let mut programs = Vec::with_capacity(functions.len());
-    let mut required_registers = 0;
-    // let mut all_registers: IndexVec<usize, usize> = IndexVec::new();
-    let mut all_registers: Vec<usize> = Vec::new();
-    let mut previous_highest = 0;
-    for (index, main_function) in functions.iter_mut().enumerate().rev() {
-        println!("============================== A FUNCTIONW AS DONE");
-        // let mut functions = rc_functions.borrow_mut();
-        // IMPORTANT: make this 0 into reflective to the current index of function
-        // ir.blocks[block_id] = block;
-        //
-        // ir.blocks
-        //     .last_mut()
-        //     .unwrap()
-        //     .instructions
-        //     .push(interpreter::codegen::Instruction::EndOfFile);
-        // ir.add_instruction(ir.blocks.last().unwrap().id, InstructionData::EndOfFile);
-
-
-        // IMPORTANT: make this in reverse order and make it so taht instead of adding + 1 it would
-        // just insert in the rpevious block a jumop instruction to the current block
-        // these lbocks are joined together by being in the same function i believe
-        //
-        // this needs to be recursive
-        // a list of where jumps should be inserted
-        let mut jumplist = Vec::new();
-        // a list of where returns should be isnerted
-        // let mut endlist = Vec::new();
-        'main: for scope in main_function.blocks.clone() {
-            println!("in scope {:?}", scope.id);
-            if let Some(scope_last) = scope.end {
-                match main_function.instructions[scope_last].data {
-                    // ignore
-                    InstructionData::Jump(_) | InstructionData::Return(_) => {}
-
-                    // NOTE: replace this with a jumpiftrue rather than this
-                    // and use jumpiffalse bytecode afterward
-                    InstructionData::JumpConditional(_, block_true, block_after) => {
-                        for (origin, after) in &mut jumplist {
-                            if *origin == scope.id {
-
-                                *origin = block_after;
-                                // after = origin;
-                                // continue 'main;
-                                break;
-                            }
-                        }
-                        jumplist.push((block_true, block_after));
-                        // if let Some() =  {
-                        //
-                        // }
-                        // if ir.instructions[ir.blocks[block_after].en]{
-                        //
-                        // }
-                        // ir.add_instruction(block_true, InstructionData::Jump(block_after), scope.function);
-                    }
-
-                    _ => {}
-                    // add/remove instructions
-                    // _ => {
-                    // println!("LAST BLOCK WAS {:?} AND IT SHOULD JUMP TO {:?}", scope.previous_block, scope.id);
-                    // if let Some(previous_block) = scope.previous_block {
-                    //
-                    // }
-                    // ir.add_instruction(scope.id, InstructionData::Jump(scope.id + 1), scope.function);
-                    // ir.insert_instruction(, reference, instruction_id);
-                    // add jump instruction
-                    // scope.instructions.push(InstructionData::Jump(scope.id + 1));
-                    // }
-                }
-            } else {
-                println!("LAST BLOCK WAS {:?} AND IT SHOULD JUMP TO {:?}", scope.previous_block, scope.id);
-
-            }
+    // ir.functions[0].frame = first_frame;
+    println!("---");
+    for (index, map) in ssa.iter().enumerate() {
+        println!("PHI {:?} MAP: ", index);
+        for (function, instruction) in map {
+            println!("      FUNCTION: {:?} INSTRUCTION ID {:?}", function, instruction);
         }
-        for (origin, point) in jumplist {
-            ir.add_instruction(
-                &mut main_function.instructions,
-                &mut main_function.blocks,
-                origin,
-                InstructionData::Jump(point),
-                // main_function.blocks[origin].function
-            );
-        }
-        // for scope in ir.blocks.clone() {
-        //     if let Some(scope_last) = scope.end {
-        //         match ir.instructions[scope_last].data {
-        //             // ignore
-        //             InstructionData::Jump(_) | InstructionData::JumpConditional(_, _, _) => {}
-        //             InstructionData::EndOfFile => {}
-        //             // add/remove instructions
-        //             _ => {
-        //                 ir.add_instruction(scope.id, InstructionData::Jump(scope.id + 1), scope.function);
-        //                 // ir.insert_instruction(, reference, instruction_id);
-        //                 // add jump instruction
-        //                 // scope.instructions.push(InstructionData::Jump(scope.id + 1));
-        //             }
-        //         }
-        //     } else {
-        //         ir.add_instruction(scope.id, InstructionData::Jump(scope.id + 1), scope.function);
-        //     }
-        //
-        //     // match scope.instructions.last() {
-        //     //     // ignore
-        //     //     Some(InstructionData::Jump(_) | InstructionData::JumpConditional(_, _, _)) => {}
-        //     //     Some(InstructionData::EndOfFile) => {}
-        //     //     // add/remove instructions
-        //     //     Some(_) => {
-        //     //         // add jump instruction
-        //     //         scope.instructions.push(InstructionData::Jump(scope.id + 1));
-        //     //     }
-        //     //     None => {
-        //     //         scope.instructions.push(InstructionData::Jump(scope.id + 1));
-        //     //         // remove block
-        //     //     }
-        //     // }
-        // }
-
-        // TODO: probably not use clone?
-        // ir.blocks[0] = block;
-        for block in &main_function.blocks {
-            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
-            ir.for_block(block, &mut main_function.instructions, |instruction| {
-                println!(
-                    "      tjhe block {:?} instruction is {:?}",
-                    instruction.id, instruction.data
-                );
-                // index += 1;
-            });
-            // println!("          succesors length {:?}", block.successors);
-            // for predl in &block.predecessors {
-            //     println!("      BLOCK {:?} HAS PREDECESSOR {:?}", block.id, predl);
-            // }
-            // for predl in &block.successors {
-            //     println!("      BLOCK {:?} HAS SUCESSOR {:?}", block.id, predl);
-            // }
-        }
-
-        println!("ok im done with that");
-        let predecessors = ir.get_predecessors(&mut main_function.instructions, &mut main_function.blocks);
-        println!("in function {:?}", index);
-        let post_order = {
-
-            let mut current_order = Vec::new(); //maybe make it wiht the capacity of all blocks?
-            let mut visited = index_vec!(false; main_function.blocks.len());
-
-
-            ir.post_order(
-                main_function,
-                0,
-                // &main_function.blocks[0],
-                // &mut main_function.blocks,
-                // &mut main_function.instructions,
-                &mut current_order,
-                &mut visited
-            );
-
-            current_order
-        };
-        // let dominance = IndexVec::with_capacity(ir.blocks.len());
-        // let mut dominance = index_vec![Vec::new(); ir.blocks.len()];
-        let mut dominance = ir.build_dominance(&mut main_function.blocks, &predecessors, post_order.clone());
-        println!("DOMINANCE: {:?}", dominance);
-        // println!(
-        //     "------------------------------------ OLD DOMINANCE: {:?}",
-        //     old_dominance
-        // );
-        // let mut dominance = index_vec!(0, 0, 0);
-
-        println!("post building dominance |||");
-        let frontier = ir.dominance_frontiers(&mut main_function.blocks, &dominance, &predecessors);
-        println!("post dominance frontier !! ");
-
-        for obj in &frontier {
-            println!("dommy {:?}", obj);
-        }
-        // for obj in dominance {
-        //     println!("dominance: {:?}", obj);
-        // }
-        let tree = ir.make_dominance_tree(&mut main_function.blocks, dominance);
-        ir.make_ssa(
-            &mut main_function.phi_instructions,
-            &mut main_function.instructions,
-            &mut main_function.blocks,
-            &mut main_function.variables,
-            frontier,
-            &tree,
-            &predecessors
-        );
-
-        ir.copy_propogation(
-            &mut main_function.instructions,
-            &mut main_function.blocks,
-            &tree,
-            &mut main_function.phi_instructions
-        );
-        ir.dead_copy_elimination(
-            &mut main_function.instructions,
-            &mut main_function.blocks,
-            &main_function.phi_instructions
-        );
-        for block in &main_function.blocks {
-            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
-            ir.for_block(block, &mut main_function.instructions, |instruction| {
-                println!(
-                    "      tjhe block {:?} instruction is {:?}",
-                    instruction.id, instruction.data
-                );
-            });
-        }
-        // println!("=======================================");
-        // println!("NOW CSSA");
-        println!("=======================================");
-
-        // ir.convert_to_cssa(&predecessors);
-        println!("||||");
-        // for block in &ir.blocks {
-        //     println!("im in block: {:?}", block.id);
-        //     for (index, instruction) in block.instructions.iter().enumerate() {
-        //         println!(
-        //             "      tjhe block {:?} instruction is {:?}",
-        //             index, instruction
-        //         );
-        //     }
-        // }
-        //
-        for block in &main_function.blocks {
-            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
-            ir.for_block(block, &mut main_function.instructions, |instruction| {
-                println!(
-                    "      tjhe block {:?} instruction is {:?}",
-                    instruction.id, instruction.data
-                );
-            });
-        }
-
-        for phi in &main_function.phi_instructions {
-            println!("theres a phi instruction! {:?}", phi);
-        }
-        println!("||||||||||||||||||||||||||||||||||||||||||");
-        println!("all of the instructions");
-        println!("||||||||||||||||||||||||||||||||||||||||||");
-
-
-        for test in &main_function.instructions {
-            println!("      INSTRUCTION {:?} WITH DATA {:?}", test.id, test.data);
-
-        }
-
-
-        let mut instruction_indices = index_vec![0; main_function.instructions.len()];
-        let instruction_order  = ir.instruction_post_order(&mut main_function.instructions, &main_function.blocks, &post_order);
-
-        for (index, indice) in instruction_order.iter().enumerate() {
-            instruction_indices[*indice] = index;
-        }
-        let liveness = ir.live_intervals(
-            &mut main_function.instructions,
-            &mut main_function.blocks,
-            &main_function.phi_instructions,
-            &post_order,
-            &instruction_indices
-        );
-        let (registers, highest) = ir.allocate_registers(
-            &mut main_function.instructions,
-            &main_function.phi_instructions,
-            liveness,
-            &instruction_order,
-            &instruction_indices,
-            &mut all_registers,
-            previous_highest
-        );
-
-        previous_highest = highest + 1;
-        // println!(":::::::::::::::::::::::::::::::::::::::::::::::::::::::: the highest is {:?}", highest);
-
-        required_registers += registers.len();
-
-        programs.push(
-            ir.compile_bytecode(
-                &main_function.instructions,
-                &main_function.blocks,
-                &instruction_indices,
-                instruction_order,
-                &post_order,
-                &registers
-            )
-        );
-
-        // for intr in block.instructions {
-        //     println!("testing: {:?}", intr);
-        // }
-
-        // println!("ir is {:?}",)
     }
+    println!("ssa is {:?} big", ssa.len());
+
+    let mut post_order = Vec::new();
+    println!("way before post oder");
+    ir.post_order(&ir.functions[0].frame, &0, 0, &mut post_order);
+    let mut order_indices = index_vec![IndexVec::new(); ir.functions.len()];
+
+    println!("----\n instructions in post order");
+    for (index, (order_function, order_id)) in post_order.iter().enumerate() {
+        let frame = &ir.functions[*order_function].frame;
+        let instr = &frame.instructions[*order_id];
+        println!("     index: {:?} function {:?} id: {:?}, data: {:?} || block {:?}", index, order_function, order_id, instr.data, instr.block)
+    }
+    println!("before");
+    for (index, (indice_function, indice)) in post_order.iter().enumerate() {
+        if order_indices[*indice_function].len() > *indice {
+            println!("ok so capacity for it was: {:?}", order_indices[*indice_function].len());
+            order_indices[*indice_function][*indice] = index;
+        } else {
+            order_indices[*indice_function].resize(*indice + 1, 0);
+            order_indices[*indice_function][*indice] = index;
+        }
+    }
+    println!("after");
+    let liveness = ir.get_liveness(&ssa, &post_order, &order_indices);
+    let register = ir.allocate_registers(&ssa, &post_order, &order_indices, liveness);
+
+
+    // for (index, register) in register.iter().enumerate() {
+        // let (order_function, order_id) = post_order[index];
+        // let frame = &ir.functions[order_function].frame;
+        // let instr = &frame.instructions[order_id];
+        // println!("    index is {:?}, function id {:?} block id {:?}, data: {:?} || target register: {:?}", index, order_function, instr.id, instr.data, register);
+        // println!("     index: {:?} function {:?} id: {:?}, data: {:?} || block {:?}", index, order_function, order_id, instr.data, instr.block)
+    // }
+
+        println!("register is {:?} ", register);
+    for (index, (order_function, order_id)) in post_order.iter().enumerate() {
+        let frame = &ir.functions[*order_function].frame;
+        let instruction = &frame.instructions[*order_id];
+        println!("the index is {:?} instruction data: {:?}, function id {:?}, instr id: {:?} || register {:?}", index, instruction.data, order_function, order_id, register[index]);
+    }
+    let bytecodes = ir.compile_bytecode(&post_order, &order_indices, &register);
     let mut virtual_machine = VM::new();
+    let mut protos = Vec::new();
 
-    let mut protos = Vec::with_capacity(functions.len());
-    for (index, function) in functions.iter().enumerate() {
-        // IMPORTANT: make base and number params and locals work!
+    for (function_index, bytecode) in bytecodes.iter().enumerate() {
+        println!(".. when inserting function {:?} : {:?}", function_index, bytecode);
+        // essentially the issue right now is that function 2 has no use thus it will not have any
+        // instructions because the register end on them is fake and thus wont be allocated i
+        // believe??
         protos.push(FunctionPrototype {
-            instructions: programs[index].clone(), // maybe not clone
-            internal_counter: 0,
-            base: 0,
+            // i might want to make it so that instructions will be in the vm not in each function
+            // and a callframe manages everything mostly
+            instructions: bytecode.to_vec(), // to_vec might nto be good
             locals: Vec::new(),
-            number_params: 0,
+            number_params: 0, // NOTE: do this later
+            //
+            // base: 0, // IMPORTANT: bassicaly, change this base value
+                     // the base just says the highest register (+ 1) for the previous function
         });
     }
     virtual_machine.functions = protos;
-    // virtual_machine.program = program;
-    virtual_machine.registers = vec![0; required_registers];
 
-    virtual_machine.execute_function(0);
-
-    for register in virtual_machine.registers {
-        println!("value of register {:?}", register);
-    }
+    virtual_machine.registers = vec![bytecode::main::SigilTypes::Empty; register.len()];
+    let mut new_callframe = CallFrame::new(0, 0, 0);
+    virtual_machine.execute_function(&mut new_callframe);
 }

@@ -6,8 +6,8 @@ pub trait Key: Copy {
 }
 
 pub struct IndexVec<K: Key, V> {
-    values: Vec<V>,
-    unused: PhantomData<K>,
+    pub values: Vec<V>,
+    pub unused: PhantomData<K>,
 }
 
 impl<K: Key, V> IndexVec<K, V> {
@@ -25,6 +25,11 @@ impl<K: Key, V> IndexVec<K, V> {
             values: Vec::with_capacity(cap),
             unused: PhantomData,
         }
+    }
+
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.values.capacity()
     }
 
     #[inline(always)]
@@ -78,6 +83,26 @@ impl<K: Key, V> IndexVec<K, V> {
     }
 
     #[inline(always)]
+    pub fn pop(&mut self) -> Option<V> {
+        self.values.pop()
+    }
+
+    #[inline(always)]
+    pub fn reserve(&mut self, amount: usize) {
+        self.values.reserve(amount);
+    }
+    #[inline(always)]
+    pub fn reserve_exact(&mut self, amount: usize) {
+        self.values.reserve_exact(amount);
+    }
+    #[inline(always)]
+    pub fn set_len(&mut self, amount: usize) {
+        unsafe {
+            self.values.set_len(amount);
+        }
+    }
+
+    #[inline(always)]
     pub fn into_inner(self) -> Vec<V> {
         self.values
     }
@@ -106,6 +131,12 @@ impl<K: Key, V: Clone> Clone for IndexVec<K, V> {
             values: self.values.clone(),
             unused: PhantomData,
         }
+    }
+}
+impl<K: Key, V: Clone> IndexVec<K, V> {
+    #[inline(always)]
+    pub fn resize(&mut self, amount: usize, default: V) {
+        self.values.resize(amount, default);
     }
 }
 

@@ -20,8 +20,14 @@ pub enum InstructionData {
 
     MakeLocal(String), // name
 
+    Upindex(usize, usize), // function id, instruction id
+    // SetUpindex(usize, usize, usize), // function id, origin
+
+    // upvalues refer to variable ids
+    Upvalue(usize, usize), // function id, varaible id
+    SetUpvalue(usize, usize, usize), // function id, variable id, value
     GetVariable(usize),        // variable id
-    SetVariable(usize, SigilTypes), // variable id, value
+    SetVariable(usize, usize), // variable id, value
     Jump(usize),               // Jumps to a general instruction id
     Unimplemented,             // IMPORTANT: delete this once done
 
@@ -39,6 +45,7 @@ pub enum InstructionData {
     Print(usize), // instruction id
     Return(Option<usize>), // returns a register?
     CallFunction(usize, Vec<usize>), // function id, vector of instruction ids as arguments!
+    Param(usize), // a temporary value, with a variable i d, used for function arguments
     EndOfFile,
 }
 
@@ -85,8 +92,9 @@ pub struct Module {
     // pub phi_instructions: IndexVec<usize, Vec<(usize, usize)>>, // Vec<block_id, instruction_id>
                                                            // pub phi_instructions: IndexVec<usize, Vec<usize>>, // IndexVec<block_id, // Vec<isntruction_id>
     // pub functions: IndexVec<usize, Functions>, // (instruction_definition_id (remobed for now), Vec<upvalue_id>, scope)
-    pub upvalues: IndexVec<usize, (usize, usize)> // (instruction_id, function_id (if its useful,
+    pub upvalues: IndexVec<usize, (usize, usize)>, // (instruction_id, function_id (if its useful,
     // option<name>))
+    pub variables: IndexVec<usize, IndexVec<usize, String>>,
 }
 
 pub struct Functions {
@@ -97,8 +105,17 @@ pub struct Functions {
     pub phi_instructions: IndexVec<usize, Vec<(usize, usize)>>,
     pub blocks: Vec<Block>,
 
-    pub variables: IndexVec<usize, String>,
-    pub upvalues: Vec<usize>, // instruction id
+    // pub variables: IndexVec<usize, String>,
+    pub upvalues: Vec<usize>, // function id, instruction id
+    pub number_params: usize,
+    pub predecessor_block: usize,
+    pub definition_location: usize, // thew locatio nof a function in a prredecessor function
+}
+
+enum VariableVariant {
+    Local(usize),
+    Upvalue(usize, usize), // function id, variable id
+    None,
 }
 
 impl Module {
@@ -112,25 +129,18 @@ impl Module {
             // phi_instructions: IndexVec::new(),
             // functions: IndexVec::new(),
             upvalues: IndexVec::new(),
+            variables: IndexVec::new(),
         }
     }
     pub fn new_block(&mut self, blocks: &mut Vec<Block>, current_block: Option<usize>) -> usize {
         let id = blocks.len();
         let block = Block {
             previous_block: current_block,
-            // start: self.instructions.len(),
             start: None,
             end: None,
             size: 0,
-            // function,
             id,
         };
-        // let block = Block {
-        //     instructions: Vec::new(),
-        //     // successors: Vec::new(),
-        //     // predecessors: Vec::new(),
-        //     id,
-        // };
         blocks.push(block);
 
         id
@@ -309,6 +319,14 @@ impl Module {
                 callback(*num_1);
                 callback(*num_2);
             }
+            InstructionData::CallFunction(instruction, args) => {
+                callback(*instruction);
+                for arg in args {
+                    callback(*arg);
+                }
+                // TODO: call function args might need to be iterated over witha callback done on
+                // them
+            }
 
             InstructionData::JumpConditional(instruction, _, _) => callback(*instruction),
 
@@ -379,6 +397,16 @@ impl Module {
                 println!("ok num2 after: {:?}", num_1);
 
                 Some(InstructionData::CompareEqual(*num_1, *num_2))
+            }
+            InstructionData::CallFunction(num_1, args) => {
+                // TODO: might need to do a iterator with callback on every single argument of call
+                // function
+                callback(num_1, instructions);
+                for arg in &mut *args {
+                    callback(arg, instructions);
+                }
+
+                Some(InstructionData::CallFunction(*num_1, args.to_vec()))
             }
 
             InstructionData::JumpConditional(instruction, v1, v2) => { callback(instruction, instructions); Some(InstructionData::JumpConditional(*instruction, *v1, *v2))},
@@ -562,11 +590,12 @@ impl Module {
     pub fn build_instruction<F: FnMut(Functions) -> usize>
     (
         &mut self,
-        variables: &mut IndexVec<usize, String>,
+        // variables: &mut IndexVec<usize, String>,
         instructions: &mut IndexVec<usize, Instruction>,
         blocks: &mut Vec<Block>,
         context_id: usize,
         expressions: Expressions,
+        highest_variable: &mut usize,
         callback: &mut F
     ) -> Option<usize> {
         match expressions {
@@ -580,12 +609,54 @@ impl Module {
                 self.add_instruction(instructions, blocks, context_id, InstructionData::LoadString(value));
             }
             Expressions::Variable(value) => {
-                self.add_instruction(
-                    instructions,
-                    blocks,
-                    context_id,
-                    InstructionData::GetVariable(variables.len() - 1),
-                );
+                let mut new_value = VariableVariant::None;
+
+                'outer: for (outer_index, var_function) in self.variables.iter().rev().enumerate() {
+                    for (index, variable) in var_function.iter().enumerate().rev() {
+                        if *variable == value {
+                            if outer_index == 0 {
+                                new_value = VariableVariant::Local(index);
+                                break 'outer;
+                            } else {
+                                new_value = VariableVariant::Upvalue(self.variables.len() - 1 - outer_index, index);
+                                break 'outer;
+                            }
+                            // new_value = Some(index);
+                        }
+                    }
+                }
+                // for (index, variable) in self.variables[self.variables.len() - 1].iter().enumerate().rev() {
+                //     if *variable == value {
+                //         // if new_value.is_some() {
+                //         //
+                //         // }
+                //         new_value = Some(index);
+                //         break;
+                //     }
+                // }
+                // println!("=-------------------------------------------------------------------- ITI S {:?}, new value {:?}", self.variables, new_value);
+                match new_value {
+                    VariableVariant::Local(val) => {
+                        self.add_instruction(
+                            instructions,
+                            blocks,
+                            context_id,
+                            InstructionData::GetVariable(val),
+                            // InstructionData::GetVariable(variables.len() - 1),
+                        );
+                    },
+                    VariableVariant::Upvalue(function, index) => {
+                        self.add_instruction(
+                            instructions,
+                            blocks,
+                            context_id,
+                            InstructionData::Upvalue(function, index),
+                            // InstructionData::GetVariable(variables.len() - 1),
+                        );
+                    }
+                    VariableVariant::None => panic!("Could not find variable: {:?}", value),
+                }
+                // panic!("Could not find variable: {:?}", value);
             }
             Expressions::LocalDefine(name, value) => {
                 let Expressions::Variable(var_name) = *name else {
@@ -598,13 +669,18 @@ impl Module {
                 // IMPORTANT: make a way to add to the variable_defintions
                 // and a way to track current block?
                 if let Some(value) = value {
-                    let _ = self.build_instruction(variables, instructions, blocks, context_id,*value, callback);
+                    println!("before var: {:?}", self.variables);
+                    let _ = self.build_instruction(instructions, blocks, context_id,*value, highest_variable, callback);
                     let context = &blocks[context_id];
-                    variables.push(var_name);
+                    let obj = self.variables.len() - 1;
+                    let vars = &mut self.variables[obj];
+                    vars.push(var_name);
+                    *highest_variable += 1;
+                    println!("SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSET VAR {:?}", self.variables);
                     self.add_instruction(instructions, blocks,
                         context.id,
                         InstructionData::SetVariable(
-                            variables.len() - 1,
+                            self.variables[obj].len() - 1,
                             // context.instructions.len() - 1,
                             context.end.unwrap(),
                         ),
@@ -612,99 +688,95 @@ impl Module {
                 };
             }
             Expressions::Assign(name, value) => {
-                self.build_instruction(variables, instructions, blocks, context_id, *value, callback);
-                let mut id = None;
-                for (index, value) in variables.iter().enumerate() {
-                    if name == *value {
-                        id = Some(index);
-                        break;
+                self.build_instruction(instructions, blocks, context_id, *value, highest_variable, callback);
+
+                let mut new_value = VariableVariant::None;
+
+                'outer: for (outer_index, var_function) in self.variables.iter().rev().enumerate() {
+                    for (index, variable) in var_function.iter().enumerate().rev() {
+                        if *variable == name {
+                            if outer_index == 0 {
+                                new_value = VariableVariant::Local(index);
+                                break 'outer;
+                            } else {
+                                new_value = VariableVariant::Upvalue(self.variables.len() - 1 - outer_index, index);
+                                break 'outer;
+                            }
+                            // new_value = Some(index);
+                        }
                     }
                 }
 
+                // let mut id = None;
+                // for (index, value) in self.variables[self.variables.len() - 1].iter().enumerate() {
+                //     if name == *value {
+                //         id = Some(index);
+                //         break;
+                //     }
+                // }
+                //
+
                 let context = &blocks[context_id];
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::SetVariable(
-                        id.unwrap(),
-                        context.end.unwrap(),
-                        // context.instructions.len(),
-                    ),
-                );
+                match new_value {
+                    VariableVariant::Local(id) => {
+                        self.add_instruction(instructions, blocks,
+                            context.id,
+                            InstructionData::SetVariable(
+                                id,
+                                context.end.unwrap(),
+                                // context.instructions.len(),
+                            ),
+                        );
+                    }
+                    VariableVariant::Upvalue(function, id) => {
+                        self.add_instruction(instructions, blocks,
+                            context.id,
+                            InstructionData::SetUpvalue(
+                                function,
+                                id,
+                                context.end.unwrap(),
+                                // context.instructions.len(),
+                            ),
+                        );
+                    }
+                    VariableVariant::None => panic!("Could not assign variable '{:?}'. Variable not found", name),
+                }
                 // variables.push(name);
                 // context.instructions.push(Instruction::SetVariable(
                 //     id.unwrap(),
                 //     context.instructions.len(),
                 // ));
             }
-            Expressions::Add(left_side, right_side) => {
-                self.build_instruction(variables, instructions, blocks, context_id, *left_side, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *right_side, callback);
+            Expressions::MathOperand(variant, left, right) => {
+                self.build_instruction(instructions, blocks, context_id, *left, highest_variable, callback);
+                self.build_instruction(instructions, blocks, context_id, *right, highest_variable, callback);
                 let context = &blocks[context_id];
                 // let length = context.instructions.len() - 1;
 
                 // println!("CONTEXT LEN: {:?}", blocks[context.id].size);
                 self.add_instruction(instructions, blocks,
                     context.id,
+                    // temporary
                     InstructionData::Add(
                         instructions[context.end.unwrap()].previous.unwrap(),
                         context.end.unwrap(),
                     ),
                 );
             }
-            Expressions::Subtract(left_side, right_side) => {
-                self.build_instruction(variables,  instructions, blocks, context_id, *left_side, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *right_side, callback);
+            Expressions::ComparisonOperand(variant, left, right) => {
+                self.build_instruction(instructions, blocks, context_id, *left, highest_variable, callback);
+                self.build_instruction(instructions, blocks, context_id, *right, highest_variable, callback);
                 let context = &blocks[context_id];
 
                 self.add_instruction(instructions, blocks,
                     context.id,
-                    InstructionData::Subtract(
+                    InstructionData::CompareEqual(
                         instructions[context.end.unwrap()].previous.unwrap(),
-                        context.end.unwrap(),
+                        // context.instructions.len() - 2,
+                        context.end.unwrap(), // context.instructions.len() - 1,
+                                              // context.instructions.len() - 1,
                     ),
 
-                );
-            }
-            Expressions::Multiply(left_side, right_side) => {
-                self.build_instruction(variables, instructions, blocks, context_id, *left_side, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *right_side, callback);
-
-                let context = &blocks[context_id];
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::Multiply(
-                        instructions[context.end.unwrap()].previous.unwrap(),
-                        context.end.unwrap(),
-                    ),
-
-                );
-            }
-            Expressions::Divide(left_side, right_side) => {
-                self.build_instruction(variables, instructions, blocks, context_id, *left_side, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *right_side, callback);
-                let context = &blocks[context_id];
-
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::Divide(
-                        instructions[context.end.unwrap()].previous.unwrap(),
-                        context.end.unwrap(),
-                    ),
-
-                );
-            }
-            Expressions::Remainder(left_side, right_side) => {
-                self.build_instruction(variables, instructions, blocks, context_id, *left_side, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *right_side, callback);
-                let context = &blocks[context_id];
-
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::Remainder(
-                        instructions[context.end.unwrap()].previous.unwrap(),
-                        context.end.unwrap(),
-                    ),
-                    // function_id
                 );
             }
             Expressions::Scope(new_scope) => {
@@ -741,7 +813,7 @@ impl Module {
                 let mut first_id = new_block_id;
                 for expression in new_scope {
                     // let new_block = &mut blocks[new_block_id];
-                    if let Some(obj) = self.build_instruction(variables, instructions, blocks, new_block_id, expression, callback) {
+                    if let Some(obj) = self.build_instruction(instructions, blocks, new_block_id, expression, highest_variable, callback) {
                         if blocks[blocks.len() - 1].size == 0 {
                             blocks.pop();
                         }
@@ -777,8 +849,14 @@ impl Module {
             Expressions::If(conditional, scope) => {
                 // maybe make a new block for the condition though i dont think that is nesscessary
                 // let condition
-                let first_scope = self.build_instruction(variables, instructions, blocks, context_id, *conditional, callback);
-                let scope = self.build_instruction(variables, instructions, blocks, context_id, *scope, callback).unwrap();
+                let first_scope = self.build_instruction(instructions, blocks, context_id, *conditional, highest_variable, callback);
+                let len = self.variables.len() - 1;
+                // let vars = &mut self.variables[len] ;
+                let old_varaibles = self.variables[len].len();
+                let scope = self.build_instruction(instructions, blocks, context_id, *scope, highest_variable, callback).unwrap();
+                for diff in old_varaibles..self.variables[len].len() {
+                    self.variables[len].pop();
+                }
                 let mut new_block = self.new_block(blocks, None);
                 let context = &blocks[context_id];
 
@@ -797,34 +875,11 @@ impl Module {
                 //     blocks.len() - 1, // blocks.len() - 1,
                 // ));
 
-                println!("RETURNING BLOCK: {:?}", new_block);
+                println!("RETURNING BLOCK: {:?}",new_block);
                 // make it jump to the new block made thats after the if scope
                 // if the condition was false
 
                 return Some(new_block);
-            }
-            Expressions::CompareEqual(primary_variable, other_variable) => {
-                // maybe make a new block for the condition though i dont think that is nesscessary
-                // let condition
-                self.build_instruction(variables, instructions, blocks, context_id, *primary_variable, callback);
-                self.build_instruction(variables, instructions, blocks, context_id, *other_variable, callback);
-                let context = &blocks[context_id];
-
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::CompareEqual(
-                        instructions[context.end.unwrap()].previous.unwrap(),
-                        // context.instructions.len() - 2,
-                        context.end.unwrap(), // context.instructions.len() - 1,
-                                              // context.instructions.len() - 1,
-                    ),
-
-                );
-                // context.instructions.push(Instruction::CompareEqual(
-                //     context.instructions.len() - 2,
-                //     context.instructions.len() - 1,
-                //     // context.instructions.len() - 1,
-                // ));
             }
             Expressions::FunctionBlock(name, arguments, scope) => {
                 // let instruction_id = instructions.len();
@@ -834,9 +889,10 @@ impl Module {
                 let block = blocks.len();
 
                 let mut instruction_arguments: Vec<InstructionData> = Vec::with_capacity(arguments.len());
-                for argument in arguments {
+                for argument in &arguments {
                     println!("ARGUMENT IS {:?}", argument)
-                    // self.build_instruction(variables, instructions, blocks,
+                    // self.build_instruction(variables, instructionshighest_variable,
+                    // highest_variable, , blocks,
                     //     context_id,
                     //     function_id,
                     //     argument,
@@ -849,29 +905,59 @@ impl Module {
                 }
                 let mut instruction_data: IndexVec<usize, InstructionData> = IndexVec::new();
                 // let function_definition = instructions.len();
-                // self.build_instruction(variables, instructions, blocks, functions, context_id, function_id, *scope, &mut |id, data| {
+                // self.build_instruction(variables, instructions, blocks, functions, context_id, function_id, *scope, &mut |id, highest_variable, data| {
                 //     // self.add_instruction(instructions, blocks, block, data, function);
                 //     instruction_data.push(data);
                 // });
 
                 // self.add_instruction(instructions, blocks, , instruction, function)
                 let mut new_blocks = Vec::new();
+                // let mut new_instruction = index_vec![; arguments.len();
                 let mut new_instruction = IndexVec::new();
                 let mut new_variables = IndexVec::new();
+                // let mut new_variables = index_vec![String::new(); arguments.len()]; // might be expensive?
                 // let block = self.new_block(&mut new_blocks, None);
-                let scope_value = self.build_instruction(&mut new_variables, &mut new_instruction, &mut new_blocks, 0, *scope, callback);
+                for argument in arguments.iter().rev() {
+                    let Expressions::Variable(name) = argument else { panic!("argument not a variable") };
+                    // new_variables[arg_index] = name.to_string();
+                    new_variables.push(name.to_string());
+                    *highest_variable += 1;
+                }
+                self.variables.push(new_variables);
+                let scope_value = self.build_instruction(&mut new_instruction, &mut new_blocks, 0, *scope, highest_variable, callback);
+                for (arg_index, argument) in arguments.iter().enumerate() {
+                    let index = self.new_instruction(&mut new_instruction, InstructionData::Param(arg_index));
+                    self.insert_instruction(&mut new_instruction, &mut new_blocks, 0, None, index);
+                    // new_variables[arg_index] = name.to_string();
+                    // self.add_instruction(&mut new_instruction, &mut new_blocks, 0, InstructionData::Param(variables.len()));
+                    // new_variables.push(name.to_string());
+                    // self.new_instruction(&mut new_instruction, )
+                    // self.new_instruction(newins, instruction));
+                }
+                self.variables.pop();
+                // panic!("ok so new variables is {:?}", new_variables);
 
                 let Expressions::Variable(name) = *name else { panic!() };
                 let function = callback(
                     Functions {
-                    name: Some(name),
+                    name: Some(name.clone()),
                     phi_instructions: IndexVec::new(),
                     blocks: new_blocks,
                     instructions: new_instruction,
                     upvalues: Vec::new(),
-                    variables: new_variables,
+                    // variables: new_variables,
+                        number_params: arguments.len(),
+                        definition_location: 0,
+                        predecessor_block: 0,
+
                 });
-                self.add_instruction(instructions, blocks, context_id, InstructionData::Closure(function));
+
+
+                // let vars = &mut self.variables[self.variables.len() - 1];
+                let len = self.variables.len() - 1;
+                self.add_instruction(instructions, blocks, context_id, InstructionData::Closure(function, self.variables[len].len()));
+                self.variables[len].push(name);
+                *highest_variable += 1;
                 // self.new_block(function_id, None);
                 println!("OUTPUT OF SCOPE THINGY IN FUNCTION {:?}", scope_value);
                 let mut instructions_start = instructions.len() - 1;
@@ -905,16 +991,17 @@ impl Module {
             }
             Expressions::CallFunction(function_variable, variadic) => {
                 if *function_variable == Expressions::Variable("print".to_string()) {
-                    self.build_instruction(variables, instructions, blocks, context_id, variadic[0].clone(), callback);
+                    self.build_instruction(instructions, blocks, context_id, variadic[0].clone(), highest_variable, callback);
+                    // panic!("the value of variadic: {:?}", variadic);
                     let context = &blocks[context_id];
 
 
+                    println!("within print!!");
                     self.add_instruction(instructions, blocks,
                         context.id,
                         InstructionData::Print(context.end.unwrap()),
-
-
                     );
+
                     return None;
                 }
                 // let mut new_function_id = 0;
@@ -933,10 +1020,10 @@ impl Module {
                 // }
                 let mut variadic_vec = Vec::with_capacity(variadic.len());
                 for variable in &variadic {
-                    self.build_instruction(variables, instructions, blocks, context_id, variable.clone(), callback);
+                    self.build_instruction(instructions, blocks, context_id, variable.clone(), highest_variable, callback);
                     variadic_vec.push(instructions.len() - 1);
                 }
-                self.build_instruction(variables, instructions, blocks, context_id, *function_variable, callback);
+                self.build_instruction(instructions, blocks, context_id, *function_variable, highest_variable, callback);
                 // let Exp new_function_id
                 // println!("instructions is {:?}", instructions);
                 println!("ok so it is now {:?}", instructions[instructions.len() - 1].data);
@@ -1208,29 +1295,7 @@ impl Module {
             }
         }
 
-        // for block in self.blocks.iter().rev() {
-        //     if block.predecessors.len() < 2 {}
-        //     continue;
-        //
-        //     let Some(dominator) = dominance.get(block.id) else {
-        //         continue;
-        //     };
-        //     let mut current_frontier = Vec::new();
-        //
-        //     let current_dominance = dominance.get(block.id).unwrap();
-        //     for predecessor in current_dominance {
-        //         for other_dominance in &dominance[*predecessor] {
-        //             if current_dominance.contains(other_dominance) {
-        //                 continue;
-        //             }
-        //             current_frontier.push(*other_dominance);
-        //         }
-        //     }
-        //
-        //     if !current_frontier.is_empty() {
-        //         frontier[block.id] = current_frontier;
-        //     }
-        // }
+        println!("so the dominacne fronteir looks like this {:?}", frontier);
 
         frontier
     }
@@ -1256,37 +1321,43 @@ impl Module {
         phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
         instructions: &mut IndexVec<usize, Instruction>,
         blocks: &mut Vec<Block>,
-        variables: &mut IndexVec<usize, String>,
+        variable_len: usize,
         dominance_frontier: IndexVec<usize, Vec<usize>>,
         dominance_tree: &IndexVec<usize, Vec<usize>>,
         predecessors: &IndexVec<usize, IndexVec<usize, usize>>,
     ) {
         let mut phis = {
             let mut visited =
-                index_vec!(index_vec!(false; variables.len()); blocks.len());
+                index_vec!(index_vec!(false; variable_len); blocks.len());
 
             let mut stack = Vec::new();
             for block in &mut *blocks {
                 self.for_block(block, instructions, |instruction| {
-                    if let InstructionData::SetVariable(id, _) = instruction.data {
-                        if !visited[block.id][id] {
-                            visited[block.id][id] = true;
-                            stack.push((block.id, id));
+                    // instructions that set a variable
+                    match instruction.data {
+                        InstructionData::SetVariable(id, _) => {
+                            if !visited[block.id][id] {
+                                visited[block.id][id] = true;
+                                stack.push((block.id, id));
+                            }
                         }
+                        InstructionData::Closure(_, id) => {
+                            println!("i found a closure instruction");
+                            if !visited[block.id][id] {
+                                println!("it ahsnt been visited");
+                                visited[block.id][id] = true;
+                                stack.push((block.id, id));
+                            }
+                        }
+                        InstructionData::SetUpvalue(function, id, value) => {
+                            if !visited[block.id][id] {
+                                visited[block.id][id] = true;
+                                stack.push((block.id, id));
+                            }
+                        }
+                        _ => {}
                     }
-                    // let Instruction::SetVariable(id, _) = instruction else {
-                    // };
                 });
-                // for instruction in &block.instructions {
-                //     let Instruction::SetVariable(id, _) = instruction else {
-                //         continue;
-                //     };
-                //
-                //     if !visited[block.id][*id] {
-                //         visited[block.id][*id] = true;
-                //         stack.push((block.id, id));
-                //     }
-                // }
             }
 
             let mut phis: IndexVec<usize, Vec<(usize, Vec<(usize, Option<usize>)>, usize)>> =
@@ -1380,81 +1451,43 @@ impl Module {
                             new_instructions[instr_id].data = InstructionData::Copy(to_value);
 
                         } // TODO: make it so that every use of variable will d this
+                        InstructionData::Upvalue(function, id) => {
+                            let new_name = new_names[id].unwrap();
+                            new_names[id] = Some(instr_id);
+                            // new_instructions[instr_id]
+                            // new_instructions[instr_id].data = InstructionData::Upindex(, ())
+
+                        }
+                        InstructionData::SetUpvalue(func, id, to_value) => {
+                            new_names[id] = Some(instr_id);
+                        }
+                        InstructionData::Closure(_, id) => {
+                            new_names[id] = Some(instr_id);
+                        }
+                        InstructionData::Param(id) => {
+                            new_names[id] = Some(instr_id);
+                        }
                         // i think this might be enough? but idk
                         _ => {}
 
                     }
                 });
-                //
-                // module.for_block_mut(
-                //     instructions,
-                //     blocks,
-                //     block_id,
-                //     |instruction| {
-                //         match instruction.data {
-                //             // IMPORTANT: instructions might not be proprely applying due to
-                //             // cloning
-                //             InstructionData::GetVariable(id) => {
-                //                 println!("got it for variable {:?}", id);
-                //                 // println!("current index: {:?}", index);
-                //                 let new_name = new_names[id].unwrap();
-                //                 // println!("new name: {:?}", new_name);
-                //                 // TOOD: make a copy instruction
-                //                 // FIXME: get some sort of way to get the id of the id of the
-                //                 // instruction
-                //                 new_names[id] = Some(instruction.id);
-                //                 println!(
-                //                     "ok its after set and the value for both is: old: {:?} | new: {:?}",
-                //                     new_name, new_names[id]
-                //                 );
-                //                 instruction.data = InstructionData::Copy(new_name);
-                //             }
-                //
-                //             InstructionData::SetVariable(id, to_value) => {
-                //                 println!("set var to id: {:?} and {:?}", id, to_value);
-                //                 // new_names[id] = Some(instruction.id);
-                //                 // instruction.next = None;
-                //                 // instruction.previous = None;
-                //                 // instruction.block = None;
-                //
-                //                 instruction.data = InstructionData::Copy(to_value);
-                //             } // TODO: make it so that every use of variable will d this
-                //             // i think this might be enough? but idk
-                //             _ => {}
-                //         }
-                //         // index += 1;
-                //     });
-                // for (index, mut instruction) in block.instructions.iter_mut().enumerate() {
-                // index += 1;
-                // }
 
-                // let mut map_size = 0;
                 module.get_successors(
                     instructions,
                     &blocks[block_id],
                     // block_id,
                     |sucessor, _| {
                     for (variable_id, map, map_id) in &mut phis[sucessor] {
-                        // let mut entry = map.iter_mut().find(|from| from == sucessor).unwrap();
-                        // for mut predecessor in map.iter() {
-                        //     if predecessor == &sucessor {
-                        //         predecessor = &mut new_names[*variable_id].unwrap();
-                        //         // dont know if this break is needed?
-                        //         // test to see if it changes a lot
-                        //         break;
-                        //     }
-                        // }
                         // TODO: dont know if this should be how it works?
-                        let entry = map
-                            .iter_mut()
-                            .find(|(from_block, _)| *from_block == block_id)
-                            .unwrap();
-                            println!("TRYING OT CHANGE THIS BLOCK {:?} TO {:?}", entry, new_names[*variable_id]);
-                        entry.1 = Some(new_names[*variable_id].unwrap());
-                        // module.phi_instructions.push(map);
-                        // map_size += 1;
-
-                        // entry = &mut new_names[*variable_id].unwrap()
+                        if let Some(var_id)  = new_names[*variable_id] {
+                            let entry = map
+                                .iter_mut()
+                                .find(|(from_block, _)| *from_block == block_id)
+                                .unwrap();
+                            println!("TRYING OT CHANGE THIS BLOCK {:?} TO {:?} with id: {:?} from: {:?}", entry, new_names[*variable_id], variable_id, new_names);
+                            entry.1 = Some(var_id);
+                        }
                     }
                 });
 
@@ -1468,7 +1501,7 @@ impl Module {
                 }
             }
 
-            let mut new_names = index_vec!(None; variables.len());
+            let mut new_names = index_vec!(None; variable_len);
             visit(0,blocks, instructions,  new_names, &mut phis, dominance_tree, self);
         }
         println!("IN THE SSA THINGY");
@@ -1488,37 +1521,26 @@ impl Module {
                 // let block = self.blocks[block_index];
                 let mut at = None;
 
-                for (block_id, map, instruction_id) in phis {
-                    let map: Vec<(usize, usize)> = map
-                        .into_iter()
-                        .map(|(from_block, instruction)| (*from_block, instruction.unwrap()))
-                        .collect();
+                'outer: for (block_id, map, instruction_id) in phis {
+                    println!("MAP IS {:?}", map);
+                    let mut new_map = Vec::with_capacity(map.len());
+                    for (from_block, instruction) in map {
+                        if let Some(instr) = instruction {
+                            new_map.push((*from_block, *instr));
+                        } else {
+                            continue 'outer;
+                        }
+                    }
 
                     println!(
                         "GOT BLOCK ID {:?} AT IS {:?} INSTRUCTION ID {:?}",
                         block_id, at, instruction_id
                     );
-                    // {
-                    //     let InstructionData::Phi(mut map_id) =
-                    //         self.instructions[*instruction_id].data
-                    //     else {
-                    //         panic!()
-                    //     };
-                    //
-                    //     // self.phi_instructions.push(map);
-                    //     println!(
-                    //         "map id {:?} for instruction id {:?}",
-                    //         map_id, instruction_id
-                    //     );
-                    //     // TODO: mightr be a more efficient way than inserting
-                    //     self.phi_instructions.inner_mut().insert(map_id, map);
-                    //     // self.phi_instructions[map_id] = map;
-                    // }
                     instructions[*instruction_id].data =
                         InstructionData::Phi(phi_instructions.len());
                     self.insert_instruction(instructions, blocks, block_index, at, *instruction_id);
                     // self.phi_instructions.len()
-                    phi_instructions.push(map);
+                    phi_instructions.push(new_map);
 
                     at = Some(*instruction_id);
                 }
@@ -1966,35 +1988,66 @@ impl Module {
         blocks: &mut Vec<Block>,
         phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
         post_order: &Vec<usize>,
-        instruction_indices: &IndexVec<usize, usize>
+        instruction_indices: &IndexVec<usize, usize>,
+        upindex: IndexVec<usize, Vec<usize>>
+
     ) -> IndexVec<usize, Option<usize>>{
 
         let instruction_order = self.instruction_post_order(instructions, blocks, post_order);
         let mut live = index_vec![None; instruction_order.len()];
 
 
+        let mut live_upindex = Vec::new();
         for (order_id, instruction_id) in instruction_order.iter().enumerate().rev() {
             let instruction = &instructions[*instruction_id];
 
             println!("checking if {:?} has value", instruction.data);
             if instruction.has_value() {
                 println!("          it does!");
-                if let InstructionData::Phi(map_id) = instruction.data {
-                    let phi_map = &phi_instructions[map_id];
-                    for (block, arg) in phi_map {
-                        let indice = instruction_indices[*arg];
-                        live[indice] = live[order_id];
-                    }
-                } else {
-                    self.instruction_args(phi_instructions, &instruction.data, |arg| {
-                        println!("In {:?}", instruction.data);
-                        let indice = instruction_indices[arg];
-                        if live[indice].is_none() {
-                            live[indice] = Some(order_id);
+                match &instruction.data {
+                    InstructionData::Phi(map_id) => {
+                        let phi_map = &phi_instructions[*map_id];
+                        for (block, arg) in phi_map {
+                            let indice = instruction_indices[*arg];
+                            live[indice] = live[order_id];
                         }
-                    });
-                }
+                    }
+                    InstructionData::Closure(function_id, var_id) => {
+                        for upindex in &upindex[*function_id] {
+                            live_upindex.push((function_id, *upindex));
+                        }
+                    }
+                    InstructionData::CallFunction(function_id, var_id) => {
+                        for (function, upindex) in &live_upindex {
+                            if *function == function_id {
+                                self.instruction_args(phi_instructions, &instructions[*upindex].data, |arg| {
+                                    let indice = instruction_indices[arg];
+                                    if live[indice].is_none() {
+                                        live[indice] = Some(order_id);
+                                    }
+                                });
 
+                            }
+                        }
+
+                        self.instruction_args(phi_instructions, &instruction.data, |arg| {
+                            println!("In {:?}", instruction.data);
+                            let indice = instruction_indices[arg];
+                            if live[indice].is_none() {
+                                live[indice] = Some(order_id);
+                            }
+                        });
+                    }
+                    _ => {
+                        self.instruction_args(phi_instructions, &instruction.data, |arg| {
+                            println!("In {:?}", instruction.data);
+                            let indice = instruction_indices[arg];
+                            if live[indice].is_none() {
+                                live[indice] = Some(order_id);
+                            }
+                        });
+                    }
+                }
             }
             // a liveness of none couudl mean 2 things
             // phi functions: maybe?
@@ -2059,8 +2112,8 @@ impl Module {
 
         let mut instruction_registers = index_vec![None; instruction_order.len()];
         println!("size of instruction order: {:?}", instruction_order.len());
-        all_registers.resize(all_registers.len() + instruction_order.len(), 0);
-        // let mut all_registers: IndexVec<usize, usize> = index_vec![0; instruction_order.len()];
+        // all_registers.resize(all_registers.len() + instruction_order.len(), 0);
+        let mut all_registers: IndexVec<usize, usize> = index_vec![0; instruction_order.len()];
         let mut phi_registers: Vec<(usize, usize)> = vec![];
         println!("THE LIVENESS FOR EVERYTHING {:?} LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", liveness);
         let mut highest_register = 0;
@@ -2069,6 +2122,10 @@ impl Module {
             let instruction = &instructions[instruction_order[order_index]];
             println!("post borrow within index {:?}", order_index);
 
+            if liveness_end.is_none() {
+                println!("its none! {:?}", order_index);
+                continue;
+            }
             if let InstructionData::Phi(map_id) = instruction.data {
                 println!("in phi");
                 let mut first_instruction = None;
@@ -2096,13 +2153,10 @@ impl Module {
                 println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PHI {:?} MET LIVENESS END {:?}", map_id,liveness_end);
                 instruction_registers[order_index] = first_register;
                 continue;
+
             }
             // NOTE: make it s othat comapre equals will ahve a lifetime so that it can do stuff
             // wit hthe registers!!
-            if liveness_end.is_none() {
-                println!("its none! {:?}", order_index);
-                continue;
-            }
 
             // for (index, register_end) in all_registers.iter_mut().enumerate() {
             //     if *register_end < order_index {
@@ -2183,16 +2237,18 @@ impl Module {
 
             match &instruction.data {
                 InstructionData::LoadNumber(num) => {
-                    println!("decoded {:?}", instruction_id);
-                    // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                    inserted_ids = output.len();
-                    println!(" {:?} Adding load", order_id);
-                    output.push(Opcode::Load as u8);
-                    output.push(*num as u8);
-                    println!("var registers: {:?} || order id {:?}", variable_registers, order_id);
-                    println!("{:?}\n{:?}", num, variable_registers[order_id]);
-                    output.push(variable_registers[order_id].unwrap() as u8);
-                    println!("---")
+                    if let Some(register_id) = variable_registers[order_id] {
+                        println!("decoded {:?}", instruction_id);
+                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
+                        inserted_ids = output.len();
+                        println!(" {:?} Adding load", order_id);
+                        output.push(Opcode::Load as u8);
+                        output.push(*num as u8);
+                        println!("var registers: {:?} || order id {:?}", variable_registers, order_id);
+                        println!("{:?}\n{:?}", num, register_id);
+                        output.push(register_id as u8);
+                        println!("---")
+                    }
                 }
                 InstructionData::Add(register_1, register_2) => {
                     if let Some(register_id) = variable_registers[order_id] {
@@ -2398,15 +2454,28 @@ impl Module {
                     // output.push(instruction_indices[*target_instruction] as u8);
                     output.push(variable_registers[instruction_indices[*target_instruction]].unwrap() as u8);
                 }
-                InstructionData::Closure(function_id) => {
+                InstructionData::Closure(function_id, variable_id) => {
+                    if let Some(register) =  variable_registers[order_id] {
 
+                        inserted_ids = output.len();
+                        output.push(Opcode::Closure as u8);
+                        output.push(*function_id as u8);
+                        output.push(register as u8);
+                    }
 
                 }
                 InstructionData::CallFunction(function_id, arguments) => {
+                    inserted_ids = output.len();
+                    output.push(Opcode::CallFunction as u8);
+                    output.push(variable_registers[instruction_indices[*function_id]].unwrap() as u8);
+                    for argument in arguments.iter().rev() {
+                        // println!("argument is {:?}", argument);
+                        output.push(variable_registers[instruction_indices[*argument]].unwrap() as u8);
+                    }
                     // println!("ok so {:?}", instructions[*function_id].data);
                     // let InstructionData::Closure(closure_function_id) = instructions[*function_id].data else { panic!("not a closure") };;
                     // inserted_ids = output.len();
-                    // println!("------------------------------=zzzzzzzzzzzzzzzzzzzzzzz function id {:?}", closure_function_id);
+                    // println!("------------------------------=zzzzzzzzzzzzzzzzzzzzzzz function id {:?}", function_id);
                     // output.push(Opcode::CallFunction as u8);
                     // output.push(*function_id as u8);
                 }

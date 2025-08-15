@@ -1,7 +1,7 @@
 // importing stuffl ooks like this
 
 
-use ./src/test 
+use ./src/test
 
 // if you want to use a specific object
 
@@ -42,20 +42,20 @@ data = set {
 }
 
 data = dict {
-    
+
 }
 local data = set {
     asd = "hi"
     test = {
         "hello"
-    } 
+    }
 
 }
 
 global test = "hi"
 
-// rec - just like in nix, means that you can use the values within the data object as if they were global/local variables 
-local data = object |> rec { 
+// rec - just like in nix, means that you can use the values within the data object as if they were global/local variables
+local data = object |> rec {
     hi = true
     status = { if hi { return "the status of hi is true" } else { return "no hi.." } }
 }
@@ -103,7 +103,7 @@ strings ('this is a string' or even "this is a string")
 bools (true, false)
 match (IF scope has a return)
 tuples
-sets 
+sets
 functions
 scopes ( {  } <- that is a scope, if used for assinging, scope should return a value)
 lists ( [ "test1", 2 ] <- this is a list, lists will have commas placed automatically per each newline and if the last token can end a statement)
@@ -138,7 +138,7 @@ fn any_func(var: impl std.traits.Display) -> string {
 
 // number iterator
 for index in 0..10 {
-    
+
 }
 
 // iterating over attribute set
@@ -181,10 +181,10 @@ app:make_window("test", set {
 // maybe app.window can be either a set or the app.window
 app:make_window("test", app.window {
     anchor = [ "left" "right" "bottom" "top" ]
-    exclusive_zone = 20,
+    exclusive_zone = 20
     view = fn() {
         // widgets.centerbox will be of a sign type
-        return widgets.centerbox { 
+        return widgets.centerbox {
             width = "fill"
             height = ( "fixed", 30 ) // tuple
             left_child = widgets.button {
@@ -245,4 +245,3 @@ it is only nesscessary when you want to define inline stuff, then everything mus
 example: if criteria { print("hi"); print("hello2") } else { print("wow"); print("wow2") }; if criteria2 { ... } ...
 yo uget the idea
 in other words, newlines or semicolons are seperators for each operator
-

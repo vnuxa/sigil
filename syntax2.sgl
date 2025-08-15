@@ -18,7 +18,7 @@ test:hello()
 // also traits, maybe rename to somethign else?
 
 trait hello_trait {
-    fn hello(self) 
+    fn hello(self)
     // trait with default implementation
     fn output(self) {
         print("i will do hello")
@@ -27,7 +27,7 @@ trait hello_trait {
 }
 
 // TODO: maybe something thats like traits but for attribute sets
-// so for example: have a function that says for stuff that specific traits 
+// so for example: have a function that says for stuff that specific traits
 // the term for it shall be sign
 
 sign hello_object {
@@ -70,4 +70,5 @@ impl std.traits.Default for custom_obj {
 
 
 
-
+// error pattern matching
+// make pattern matching really easy & nice

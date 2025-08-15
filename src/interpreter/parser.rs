@@ -1,8 +1,29 @@
-use std::{rc::Rc, sync::Arc};
+use std::{f32::consts::E, rc::Rc, sync::Arc};
 
 use logos::{Lexer, Logos};
 
-use chumsky::prelude::*;
+use chumsky::{combinator::To, prelude::*};
+
+use crate::interpreter::codegen2::{ComparisonVariant, MathVariant};
+// use crate::interpreter::codegen2::{ComparisonVariant, MathVariant};
+// // IMPORTANT: DELETE THE VARIANT ENUMS BELOW
+// #[derive(Clone, Hash, PartialEq, Eq, Debug)]
+// pub enum MathVariant {
+//     Add = 0,
+//     Subtract = 1,
+//     Multiply = 2,
+//     Divide = 3,
+//     Remainder = 4
+// }
+// #[derive(Clone, Hash, PartialEq, Eq, Debug)]
+// pub enum ComparisonVariant {
+//     Equal = 0,
+//     NotEqual = 1,
+//     LessEqual = 2,
+//     MoreEqual = 3,
+//     LessThan = 4,
+//     MoreThan = 5,
+// }
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Expressions {
@@ -10,22 +31,25 @@ pub enum Expressions {
     Int(isize),
     Variable(String),
     String(String),
+    Param(usize),
 
     Negative(Box<Expressions>), // makes a number negative
 
-    Add(Box<Expressions>, Box<Expressions>),
-    Subtract(Box<Expressions>, Box<Expressions>),
-    Multiply(Box<Expressions>, Box<Expressions>),
-    Divide(Box<Expressions>, Box<Expressions>),
-    Remainder(Box<Expressions>, Box<Expressions>),
+    MathOperand(MathVariant, Box<Expressions>, Box<Expressions>),
+    ComparisonOperand(ComparisonVariant, Box<Expressions>, Box<Expressions>),
+    // Add(Box<Expressions>, Box<Expressions>),
+    // Subtract(Box<Expressions>, Box<Expressions>),
+    // Multiply(Box<Expressions>, Box<Expressions>),
+    // Divide(Box<Expressions>, Box<Expressions>),
+    // Remainder(Box<Expressions>, Box<Expressions>),
     ConcatenateString(Box<Expressions>, Box<Expressions>),
 
-    CompareEqual(Box<Expressions>, Box<Expressions>),
-    CompareNotEqual(Box<Expressions>, Box<Expressions>),
-    CompareLessThan(Box<Expressions>, Box<Expressions>),
-    CompareMoreThan(Box<Expressions>, Box<Expressions>),
-    CompareLessEquals(Box<Expressions>, Box<Expressions>),
-    CompareMoreEquals(Box<Expressions>, Box<Expressions>),
+    // CompareEqual(Box<Expressions>, Box<Expressions>),
+    // CompareNotEqual(Box<Expressions>, Box<Expressions>),
+    // CompareLessThan(Box<Expressions>, Box<Expressions>),
+    // CompareMoreThan(Box<Expressions>, Box<Expressions>),
+    // CompareLessEquals(Box<Expressions>, Box<Expressions>),
+    // CompareMoreEquals(Box<Expressions>, Box<Expressions>),
 
     GlobalDefine(Box<Expressions>, Option<Box<Expressions>>), // variable name, variable definition
     LocalDefine(Box<Expressions>, Option<Box<Expressions>>),  // variable name, variable definition
@@ -40,7 +64,8 @@ pub enum Expressions {
 
     EndOfFile,
     ScopeEnd,
-    ParanthesesEnd
+    ParanthesesEnd,
+    Comma,
 }
 
 #[derive(Logos, Debug, PartialEq, Eq, Hash, Clone)]
@@ -234,51 +259,33 @@ impl Expressions {
     ) -> Self {
         match value {
             Tokens::Add => {
-                Expressions::Add(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
+                Expressions::MathOperand(MathVariant::Add, Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
             Tokens::Subtract => {
-                Expressions::Subtract(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
+                Expressions::MathOperand(MathVariant::Subtract, Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
             Tokens::Multiply => {
-                Expressions::Multiply(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
+                Expressions::MathOperand(MathVariant::Multiply, Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
             Tokens::Divide => {
-                Expressions::Divide(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
+                Expressions::MathOperand(MathVariant::Divide, Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
             Tokens::Remainder => {
-                Expressions::Remainder(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
+                Expressions::MathOperand(MathVariant::Remainder, Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
             Tokens::Access => {
                 Expressions::Access(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
-            Tokens::CompareEqual => Expressions::CompareEqual(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
+            Tokens::CompareEqual => Expressions::ComparisonOperand(ComparisonVariant::Equal, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
             Tokens::SquaredBracketOpen => {
                 println!("left side: {:?}, right side: {:?}", left_side, right_side);
                 Expressions::Index(Box::new(left_side.unwrap()), Box::new(right_side.unwrap()))
             }
-            Tokens::CompareNotEqual => Expressions::CompareNotEqual(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
-            Tokens::CompareLessThan => Expressions::CompareLessThan(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
-            Tokens::CompareMoreThan => Expressions::CompareMoreThan(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
-            Tokens::CompareLessEquals => Expressions::CompareLessEquals(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
-            Tokens::CompareMoreEquals => Expressions::CompareMoreEquals(
-                Box::new(left_side.unwrap()),
-                Box::new(right_side.unwrap()),
-            ),
+            Tokens::CompareNotEqual => Expressions::ComparisonOperand(ComparisonVariant::NotEqual, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
+            Tokens::CompareLessThan => Expressions::ComparisonOperand(ComparisonVariant::LessThan, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
+            Tokens::CompareMoreThan => Expressions::ComparisonOperand(ComparisonVariant::MoreThan, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
+            Tokens::CompareLessEquals => Expressions::ComparisonOperand(ComparisonVariant::LessEqual, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
+            Tokens::CompareMoreEquals => Expressions::ComparisonOperand(ComparisonVariant::MoreEqual, Box::new(left_side.unwrap()), Box::new(right_side.unwrap())),
             Tokens::ParenthesesOpen => {
                 Expressions::CallFunction(Box::new(left_side.unwrap()), many.unwrap())
             }
@@ -445,8 +452,13 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
             loop {
                 let expression = parser(tokens, 0);
 
-                if let Expressions::ParanthesesEnd = expression {
-                    break;
+                // if let Expressions::ParanthesesEnd = expression {
+                //     break;
+                // }
+                match expression {
+                    Expressions::ParanthesesEnd => break,
+                    Expressions::Comma => continue,
+                    _ => {}
                 }
 
                 arguments.push(expression);
@@ -474,7 +486,9 @@ fn parser(tokens: &mut Vec<Tokens>, min_power: u8) -> Expressions {
             Expressions::String(value)
         }
         None => Expressions::EndOfFile,
+        Some(Tokens::Comma) => Expressions::Comma,
         // Some(Tokens::ParenthesesClose) => Expressions::EndOfFile,
+
         e => panic!("not handled: {:?}", e),
     };
 
