@@ -9,7 +9,7 @@ use interpreter::{
     parser::generate,
 };
 
-use crate::interpreter::codegen2::{BlockFrame, Functions, InstructionData, Module};
+use crate::interpreter::codegen::{BlockFrame, Functions, InstructionData, Module};
 //
 mod bytecode;
 mod index_vec;

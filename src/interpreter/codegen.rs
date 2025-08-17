@@ -1,14 +1,6 @@
-// use crate::bytecode::main::Opcode;
+use chumsky::prelude::skip_then_retry_until;
 
-use std::{collections::HashMap, rc::Rc};
-
-use chumsky::container::{Container, Seq};
-
-use crate::{bytecode::main::{Opcode, SigilTypes}, index_vec::{index_vec, IndexVec}};
-
-use super::parser::Expressions;
-
-// pub fn to_bytecode(expression: Expressions) -> Opcode {}
+use crate::{bytecode::main::Opcode, index_vec::{index_vec, IndexVec}, interpreter::parser::Expressions};
 
 #[derive(Clone, Debug)]
 pub enum InstructionData {
@@ -21,6 +13,7 @@ pub enum InstructionData {
     MakeLocal(String), // name
 
     Upindex(usize, usize), // function id, instruction id
+    SetUpindex(usize, usize), // to_value, upindex instruction id
     // SetUpindex(usize, usize, usize), // function id, origin
 
     // upvalues refer to variable ids
@@ -31,14 +24,10 @@ pub enum InstructionData {
     Jump(usize),               // Jumps to a general instruction id
     Unimplemented,             // IMPORTANT: delete this once done
 
-    Add(usize, usize), // instruction id 1 and 2
-    Subtract(usize, usize),
-    Multiply(usize, usize),
-    Divide(usize, usize),
-    Remainder(usize, usize),
+    MathOperands(MathVariant, usize, usize),
+    ComparisonOperands(ComparisonVariant, usize, usize),
     Phi(usize), // id to a phi map, which contains a list of bloock id and instruction or variable id
     Copy(usize),
-    CompareEqual(usize, usize),           // instruction id, instruction id
     JumpConditional(usize, usize, usize), // instruction id, jump if true, jump if false
     ParallelCopy(usize, usize),           // instruction_id, copy id
     Closure(usize, usize), // function id, variable_id
@@ -49,21 +38,37 @@ pub enum InstructionData {
     EndOfFile,
 }
 
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub enum MathVariant {
+    Add = 0,
+    Subtract = 1,
+    Multiply = 2,
+    Divide = 3,
+    Remainder = 4
+}
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub enum ComparisonVariant {
+    Equal = 0,
+    NotEqual = 1,
+    LessEqual = 2,
+    MoreEqual = 3,
+    LessThan = 4,
+    MoreThan = 5,
+}
 pub enum Value {
     String(String),
     Number(isize),
     Bool(bool),
 }
 
-// #[derive(Clone)]
-// pub struct Block {
-//     pub instructions: Vec<InstructionData>,
-//     pub id: usize,
-//     // pub successors: Vec<usize>,
-//     // pub predecessors: Vec<usize>, // mgiht be useless?
-// }
+#[derive(Debug, Clone, Copy)]
+pub enum Register {
+    Relative(usize),
+    Absolute(usize),
+    AbsoluteToFunction(usize, usize)
+}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Block {
     pub id: usize,
     pub start: Option<usize>,
@@ -73,7 +78,7 @@ pub struct Block {
     pub previous_block: Option<usize>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Instruction {
     pub data: InstructionData,
     pub block: Option<usize>,
@@ -84,32 +89,22 @@ pub struct Instruction {
 }
 
 pub struct Module {
-    // pub blocks: Vec<Block>,
-    // pub blocks: Vec<Block>,
-    // pub variables: IndexVec<usize, String>,
-    // pub instructions: IndexVec<usize, Instruction>,
-    pub variable_definitions: IndexVec<usize, Vec<usize>>, // variable index -  blocks that define it
-    // pub phi_instructions: IndexVec<usize, Vec<(usize, usize)>>, // Vec<block_id, instruction_id>
-                                                           // pub phi_instructions: IndexVec<usize, Vec<usize>>, // IndexVec<block_id, // Vec<isntruction_id>
-    // pub functions: IndexVec<usize, Functions>, // (instruction_definition_id (remobed for now), Vec<upvalue_id>, scope)
-    pub upvalues: IndexVec<usize, (usize, usize)>, // (instruction_id, function_id (if its useful,
-    // option<name>))
     pub variables: IndexVec<usize, IndexVec<usize, String>>,
+    pub highest_variable: usize,
+    pub functions: IndexVec<usize, Functions>,
+    pub phi_functions: IndexVec<usize, Vec<(usize, usize, usize)>>
+    // ^ Vec<function_id, block_id, instruction_id>
+
 }
 
 pub struct Functions {
     pub name: Option<String>,
-    // pub instructions_start: usize,
-    // pub instructions_end: usize,
-    pub instructions: IndexVec<usize, Instruction>,
-    pub phi_instructions: IndexVec<usize, Vec<(usize, usize)>>,
-    pub blocks: Vec<Block>,
-
-    // pub variables: IndexVec<usize, String>,
-    pub upvalues: Vec<usize>, // function id, instruction id
-    pub number_params: usize,
-    pub predecessor_block: usize,
-    pub definition_location: usize, // thew locatio nof a function in a prredecessor function
+    pub frame: BlockFrame,
+    pub predecessor_block: Option<usize>,
+    pub predecessor_function: Option<usize>,
+    pub definition_id: usize,
+    pub upindex_amount: usize,
+    pub id: usize,
 }
 
 enum VariableVariant {
@@ -118,496 +113,40 @@ enum VariableVariant {
     None,
 }
 
+#[derive(Clone)]
+pub struct BlockFrame {
+    pub instructions: IndexVec<usize, Instruction>,
+    pub blocks: Vec<Block>,
+    pub phi_instructions: Option<IndexVec<usize, Vec<(usize, usize)>>>,
+    pub id: usize,
+}
+
+// functions
 impl Module {
     pub fn new() -> Self {
         Self {
-            // blocks: Vec::new(),
-            // blocks: Vec::new(),
-            // variables: IndexVec::new(),
-            variable_definitions: IndexVec::new(),
-            // instructions: IndexVec::new(),
-            // phi_instructions: IndexVec::new(),
-            // functions: IndexVec::new(),
-            upvalues: IndexVec::new(),
             variables: IndexVec::new(),
+            highest_variable: 0,
+            functions: IndexVec::with_capacity(1),
+            phi_functions: IndexVec::with_capacity(1),
         }
     }
-    pub fn new_block(&mut self, blocks: &mut Vec<Block>, current_block: Option<usize>) -> usize {
-        let id = blocks.len();
-        let block = Block {
-            previous_block: current_block,
-            start: None,
-            end: None,
-            size: 0,
-            id,
-        };
-        blocks.push(block);
+    fn compile(&self, syntax: Vec<Expressions>) {
+        for expression in &syntax {
 
-        id
+        }
     }
 
-    pub fn add_instruction(
+    pub fn build_expression(
         &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        block_id: usize,
-        instruction: InstructionData,
-        // function: usize
-    ) -> usize {
-        let block = &mut blocks[block_id];
-        let old_last = block.end;
-
-        let id = instructions.len();
-        if let Some(end_id) = old_last {
-            instructions[end_id].next = Some(id);
-            block.end = Some(id);
-            block.size += 1;
-        } else {
-            block.start = Some(id);
-            block.end = Some(id);
-            block.size = 1;
-        }
-
-        instructions.push(Instruction {
-            data: instruction,
-            previous: old_last,
-            next: None,
-            block: Some(block_id),
-            id: instructions.len(),
-            // function
-        });
-
-        id
-    }
-
-    // creates a new instruction, without adding it
-    pub fn new_instruction(&mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        instruction: InstructionData,
-        // function: usize
-    ) -> usize {
-        let id = instructions.len();
-
-        instructions.push(Instruction {
-            data: instruction,
-            previous: None,
-            next: None,
-            block: None,
-            id,
-            // function
-        });
-
-        id
-    }
-
-    pub fn remove_instruction(&mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        instruction_id: usize
-
+        expression: Expressions,
+        block_frame: &mut BlockFrame,
+        current_block: usize
     ) -> Option<usize> {
-        println!("REMOVE INSTRUCTION WAS CALLED FOR {:?}", instruction_id);
-        let instruction = &mut instructions[instruction_id];
-        // let Some(instruction_block) = instruction.block else {
-        //     return None;
-        // };
-        let block = &mut blocks[instruction.block?];
-
-        let old_previous = instruction.previous;
-        let old_next = instruction.next;
-        instruction.previous = None;
-        instruction.next = None;
-        instruction.block = None;
-
-        if let Some(previous) = old_previous {
-            instructions[previous].next = old_next;
-        } else {
-            block.start = old_next;
-        }
-
-        if let Some(next) = old_next {
-            instructions[next].previous = old_previous;
-        } else {
-            block.end = old_previous;
-        }
-
-        block.size -= 1;
-
-        old_next
-    }
-
-    pub fn insert_instruction(
-        &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        block_id: usize,
-        reference: Option<usize>,
-        instruction_id: usize,
-    ) {
-        let block = &mut blocks[block_id];
-
-        let (previous, next) = {
-            if let Some(reference_id) = reference {
-                (Some(reference_id), instructions[reference_id].next)
-            } else {
-                (None, block.start)
-            }
-        };
-
-        let instruction = &mut instructions[instruction_id];
-
-        instruction.block = Some(block_id);
-        instruction.previous = previous;
-        instruction.next = next;
-        block.size += 1;
-
-        if let Some(prev) = previous {
-            instructions[prev].next = Some(instruction_id);
-        } else {
-            block.start = Some(instruction_id);
-        }
-
-        if let Some(next) = next {
-            instructions[next].previous = Some(instruction_id);
-        } else {
-            block.end = Some(instruction_id);
-        }
-    }
-
-    pub fn instruction_args<F: FnMut(usize)>(
-        &self,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
-        instruction: &InstructionData,
-        mut callback: F,
-    ) {
-        match instruction {
-            InstructionData::Copy(data) => callback(*data),
-            InstructionData::Print(data) => callback(*data),
-            InstructionData::Phi(map_id) => {
-                // let mut map = core::mem::take(&self.phi_instructions[map_id]);
-
-                // let map = &mut module.phi_instructions[map_id];
-                for (_, data) in &phi_instructions[*map_id] {
-                    println!("              within phi \\/");
-                    callback(*data);
-                }
-                // println!("ok data after: {:?}", map);
-
-                // self.phi_instructions[map_id] = map;
-            }
-            InstructionData::Add(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::Subtract(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::Multiply(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::Divide(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::Remainder(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::CompareEqual(num_1, num_2) => {
-                callback(*num_1);
-                callback(*num_2);
-            }
-            InstructionData::CallFunction(instruction, args) => {
-                callback(*instruction);
-                for arg in args {
-                    callback(*arg);
-                }
-                // TODO: call function args might need to be iterated over witha callback done on
-                // them
-            }
-
-            InstructionData::JumpConditional(instruction, _, _) => callback(*instruction),
-
-            // TODO: add more comparisons, return, calls, tuples, lists here too
-            _ => {}
-        }
-    }
-    pub fn replace_instruction<F: FnMut(&mut usize, &mut IndexVec<usize, Instruction>)>(
-        &mut self,
-        phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        instruction: &mut InstructionData,
-        mut callback: F,
-    ) -> Option<InstructionData> {
-        match instruction {
-            InstructionData::Copy(data) =>  {  println!("copy before {:?}", data); callback(data, instructions); println!("copy should be {:?}", data); Some(InstructionData::Copy(*data))},
-            InstructionData::Print(data) => { callback(data, instructions); Some(InstructionData::Print(*data)) },
-            InstructionData::Phi(map_id) => {
-                let mut map = core::mem::take(&mut phi_instructions[*map_id]);
-
-                // let map = &mut module.phi_instructions[map_id];
-                for (_, data) in &mut map {
-                    println!("              within phi \\/");
-                    callback(data, instructions);
-                }
-                println!("ok data after: {:?}", map);
-
-                phi_instructions[*map_id] = map;
-
-                Some(InstructionData::Phi(*map_id))
-            }
-            InstructionData::Add(num_1, num_2) => {
-                callback(num_1, instructions);
-                callback(num_2, instructions);
-
-                Some(InstructionData::Add(*num_1, *num_2))
-            }
-            InstructionData::Subtract(num_1, num_2) => {
-                callback(num_1, instructions);
-                callback(num_2, instructions);
-
-                Some(InstructionData::Subtract(*num_1, *num_2))
-            }
-            InstructionData::Multiply(num_1, num_2) => {
-                callback(num_1, instructions);
-                callback(num_2, instructions);
-
-                Some(InstructionData::Multiply(*num_1, *num_2))
-            }
-            InstructionData::Divide(num_1, num_2) => {
-                callback(num_1, instructions);
-                callback(num_2, instructions);
-
-                Some(InstructionData::Divide(*num_1, *num_2))
-            }
-            InstructionData::Remainder(num_1, num_2) => {
-                callback(num_1, instructions);
-                callback(num_2, instructions);
-
-                Some(InstructionData::Remainder(*num_1, *num_2))
-            }
-            InstructionData::CompareEqual(num_1, num_2) => {
-                println!("ok num1 before: {:?}", num_1);
-                callback(num_1, instructions);
-                println!("ok num1 after: {:?}", num_1);
-                println!("ok num2 before: {:?}", num_1);
-                callback(num_2, instructions);
-                println!("ok num2 after: {:?}", num_1);
-
-                Some(InstructionData::CompareEqual(*num_1, *num_2))
-            }
-            InstructionData::CallFunction(num_1, args) => {
-                // TODO: might need to do a iterator with callback on every single argument of call
-                // function
-                callback(num_1, instructions);
-                for arg in &mut *args {
-                    callback(arg, instructions);
-                }
-
-                Some(InstructionData::CallFunction(*num_1, args.to_vec()))
-            }
-
-            InstructionData::JumpConditional(instruction, v1, v2) => { callback(instruction, instructions); Some(InstructionData::JumpConditional(*instruction, *v1, *v2))},
-
-            // TODO: add more comparisons, return, calls, tuples, lists here too
-            e => {
-                // unimplemented!("{:?}", e)
-                None
-            }
-        }
-    }
-
-    // pub fn for_function<F: FnMut(&Module, &mut Functions)>(
-    //     &mut self,
-    //     // block: &Block,
-    //     // instructions: &mut IndexVec<usize, Instruction>,
-    //     // block_id: usize,
-    //     mut callback: F
-    // ) {
-    //     for function in &mut self.functions {
-    //         callback(self, function);
-    //     }
-    //     // let mut at = block.start;
-    //     // while let Some(id) = at {
-    //     //     let instruction = &instructions[id];
-    //     //     callback(instruction);
-    //     //
-    //     //     at = instruction.next;
-    //     // }
-    // }
-    pub fn for_block<F: FnMut(&Instruction)>(
-        &self,
-        block: &Block,
-        instructions: &mut IndexVec<usize, Instruction>,
-        // block_id: usize,
-        mut callback: F
-    ) {
-        let mut at = block.start;
-        while let Some(id) = at {
-            let instruction = &instructions[id];
-            callback(instruction);
-
-            at = instruction.next;
-        }
-    }
-    // for block loop with an early terminator
-    pub fn for_block_terminator<F: FnMut(&Instruction) -> bool>(&self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &Vec<Block>,
-        block_id: usize,
-        mut callback: F
-    ) {
-        let mut at = blocks[block_id].start;
-        while let Some(id) = at {
-            let instruction = &instructions[id];
-            if !callback(instruction) {
-                break;
-            }
-
-            at = instruction.next;
-        }
-    }
-    pub fn for_block_mut<F: FnMut(&mut Instruction)>(
-        &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        block_id: usize,
-        mut callback: F
-    ) {
-        let mut at = blocks[block_id].start;
-        while let Some(id) = at {
-            let instruction = &mut instructions[id];
-            callback(instruction);
-
-            at = instruction.next;
-        }
-    }
-    pub fn for_block_reverse<F: FnMut(&Instruction)>(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        // blocks: &mut Vec<Block>,
-        block: &Block,
-        mut callback: F
-    ) {
-        let mut at = block.end; // blocks[block_id].end;
-        while let Some(id) = at {
-            let instruction = &instructions[id];
-            callback(instruction);
-
-            at = instruction.previous;
-        }
-    }
-
-    // loops over every instruction and runs a function for every single argument they have
-    pub fn block_replace_args<F: FnMut(&mut usize, &mut IndexVec<usize, Instruction>)>(
-        &mut self,
-        block: &Block,
-        // blocks: &mut Vec<Block>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
-        // block_id: usize,
-        mut callback: F,
-    ) {
-        let mut at = block.start;
-        while let Some(id) = at {
-            // TODO: might not have to clone?
-            println!("replace instruction: at id {:?}", at);
-            let mut data = instructions[id].data.clone();
-            println!("before: {:?}", instructions[id].data);
-            if let Some(new_data) =  self.replace_instruction(phi_instructions, instructions,  &mut data, &mut callback) {
-                instructions[id].data = new_data;
-            }
-            // instructions[id].data = self.replace_instruction(phi_instructions, instructions,  &mut data, &mut callback);
-            println!("ok after: {:?}", instructions[id].data);
-            // callback(self, instruction.id);
-
-            let instr = &mut instructions[id];
-            // instr.data = data;
-            at = instr.next;
-            // at = self.instructions[id].next;
-        }
-    }
-
-    pub fn all_args<F: FnMut(usize)>(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
-        blocks: &mut Vec<Block>,
-        mut callback: F
-    ) {
-        for block in blocks {
-            let mut at = block.start;
-            while let Some(id) = at {
-                let instruction = &instructions[id];
-                self.instruction_args(phi_instructions, &instruction.data, &mut callback);
-
-                at = instruction.next;
-            }
-        }
-    }
-
-    pub fn get_successors<F: FnMut(
-        usize,
-        &mut IndexVec<usize, Instruction>,
-    )>(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        block: &Block,
-        mut callback: F
-    ) {
-        // let block = &blocks[block_id];
-
-        // let last_instruction = block.instructions.last().unwrap();
-
-        match instructions[block.end.unwrap()].data {
-            InstructionData::Jump(target) => callback(target, instructions),
-            InstructionData::JumpConditional(_, target_1, target_2) => {
-                callback(target_1, instructions);
-                callback(target_2, instructions)
-            }
-            InstructionData::EndOfFile => {}
-            // _ => unimplemented!("tried calling successors on an unterminated block"),
-            _ => println!("unterminated block right here {:?}", block.id),
-        }
-    }
-
-    pub fn get_predecessors(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-
-    ) -> IndexVec<usize, IndexVec<usize, usize>> {
-        let mut predecessors = index_vec!(IndexVec::new(); blocks.len());
-
-        for block in blocks {
-            self.get_successors(instructions, block, |successor, _| predecessors[successor].push(block.id));
-        }
-
-        predecessors
-    }
-    pub fn build_instruction<F: FnMut(Functions) -> usize>
-    (
-        &mut self,
-        // variables: &mut IndexVec<usize, String>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        context_id: usize,
-        expressions: Expressions,
-        highest_variable: &mut usize,
-        callback: &mut F
-    ) -> Option<usize> {
-        match expressions {
-            Expressions::Int(num) => {
-                self.add_instruction(instructions, blocks, context_id, InstructionData::LoadNumber(num));
-            }
-            Expressions::Bool(bool) => {
-                self.add_instruction(instructions, blocks, context_id, InstructionData::LoadBool(bool));
-            }
-            Expressions::String(value) => {
-                self.add_instruction(instructions, blocks, context_id, InstructionData::LoadString(value));
-            }
+        match expression {
+            Expressions::Int(num) => { Self::add_instruction(block_frame, current_block, InstructionData::LoadNumber(num)); },
+            Expressions::Bool(val) => { Self::add_instruction(block_frame, current_block, InstructionData::LoadBool(val)); },
+            Expressions::String(string) => { Self::add_instruction(block_frame, current_block, InstructionData::LoadString(string)); },
             Expressions::Variable(value) => {
                 let mut new_value = VariableVariant::None;
 
@@ -625,34 +164,12 @@ impl Module {
                         }
                     }
                 }
-                // for (index, variable) in self.variables[self.variables.len() - 1].iter().enumerate().rev() {
-                //     if *variable == value {
-                //         // if new_value.is_some() {
-                //         //
-                //         // }
-                //         new_value = Some(index);
-                //         break;
-                //     }
-                // }
-                // println!("=-------------------------------------------------------------------- ITI S {:?}, new value {:?}", self.variables, new_value);
                 match new_value {
                     VariableVariant::Local(val) => {
-                        self.add_instruction(
-                            instructions,
-                            blocks,
-                            context_id,
-                            InstructionData::GetVariable(val),
-                            // InstructionData::GetVariable(variables.len() - 1),
-                        );
+                        Self::add_instruction(block_frame, current_block, InstructionData::GetVariable(val));
                     },
                     VariableVariant::Upvalue(function, index) => {
-                        self.add_instruction(
-                            instructions,
-                            blocks,
-                            context_id,
-                            InstructionData::Upvalue(function, index),
-                            // InstructionData::GetVariable(variables.len() - 1),
-                        );
+                        Self::add_instruction(block_frame, current_block, InstructionData::Upvalue(function, index));
                     }
                     VariableVariant::None => panic!("Could not find variable: {:?}", value),
                 }
@@ -663,32 +180,26 @@ impl Module {
                     panic!()
                 };
 
-                // self.add_instruction(instructions, blocks, context_id, InstructionData::MakeLocal(var_name.clone()));
-                // context.instructions.push();
-
-                // IMPORTANT: make a way to add to the variable_defintions
-                // and a way to track current block?
                 if let Some(value) = value {
-                    println!("before var: {:?}", self.variables);
-                    let _ = self.build_instruction(instructions, blocks, context_id,*value, highest_variable, callback);
-                    let context = &blocks[context_id];
+                    let _ = self.build_expression(*value, block_frame, current_block);
+                    let context = &block_frame.blocks[current_block];
                     let obj = self.variables.len() - 1;
                     let vars = &mut self.variables[obj];
                     vars.push(var_name);
-                    *highest_variable += 1;
-                    println!("SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSET VAR {:?}", self.variables);
-                    self.add_instruction(instructions, blocks,
-                        context.id,
+                    self.highest_variable += 1;
+
+                    Self::add_instruction(
+                        block_frame,
+                        current_block,
                         InstructionData::SetVariable(
                             self.variables[obj].len() - 1,
-                            // context.instructions.len() - 1,
-                            context.end.unwrap(),
+                            context.end.unwrap()
                         ),
                     );
-                };
+                }
             }
             Expressions::Assign(name, value) => {
-                self.build_instruction(instructions, blocks, context_id, *value, highest_variable, callback);
+                self.build_expression(*value, block_frame, current_block);
 
                 let mut new_value = VariableVariant::None;
 
@@ -706,1921 +217,1584 @@ impl Module {
                         }
                     }
                 }
-
-                // let mut id = None;
-                // for (index, value) in self.variables[self.variables.len() - 1].iter().enumerate() {
-                //     if name == *value {
-                //         id = Some(index);
-                //         break;
-                //     }
-                // }
-                //
-
-                let context = &blocks[context_id];
+                let context = &block_frame.blocks[current_block];
                 match new_value {
                     VariableVariant::Local(id) => {
-                        self.add_instruction(instructions, blocks,
-                            context.id,
+                        Self::add_instruction(
+                            block_frame,
+                            current_block,
                             InstructionData::SetVariable(
                                 id,
-                                context.end.unwrap(),
-                                // context.instructions.len(),
-                            ),
+                                context.end.unwrap()
+                            )
                         );
                     }
                     VariableVariant::Upvalue(function, id) => {
-                        self.add_instruction(instructions, blocks,
-                            context.id,
+                        Self::add_instruction(
+                            block_frame,
+                            current_block,
                             InstructionData::SetUpvalue(
                                 function,
                                 id,
-                                context.end.unwrap(),
-                                // context.instructions.len(),
-                            ),
+                                context.end.unwrap()
+                            )
                         );
                     }
                     VariableVariant::None => panic!("Could not assign variable '{:?}'. Variable not found", name),
                 }
                 // variables.push(name);
-                // context.instructions.push(Instruction::SetVariable(
-                //     id.unwrap(),
-                //     context.instructions.len(),
-                // ));
             }
             Expressions::MathOperand(variant, left, right) => {
-                self.build_instruction(instructions, blocks, context_id, *left, highest_variable, callback);
-                self.build_instruction(instructions, blocks, context_id, *right, highest_variable, callback);
-                let context = &blocks[context_id];
-                // let length = context.instructions.len() - 1;
+                self.build_expression(*left, block_frame, current_block);
+                self.build_expression(*right, block_frame, current_block);
+                let context = &block_frame.blocks[current_block];
 
-                // println!("CONTEXT LEN: {:?}", blocks[context.id].size);
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    // temporary
-                    InstructionData::Add(
-                        instructions[context.end.unwrap()].previous.unwrap(),
+                Self::add_instruction(
+                    block_frame,
+                    current_block,
+                    InstructionData::MathOperands(
+                        variant,
+                        block_frame.instructions[context.end.unwrap()].previous.unwrap(),
                         context.end.unwrap(),
-                    ),
-                );
-            }
-            Expressions::ComparisonOperand(variant, left, right) => {
-                self.build_instruction(instructions, blocks, context_id, *left, highest_variable, callback);
-                self.build_instruction(instructions, blocks, context_id, *right, highest_variable, callback);
-                let context = &blocks[context_id];
-
-                self.add_instruction(instructions, blocks,
-                    context.id,
-                    InstructionData::CompareEqual(
-                        instructions[context.end.unwrap()].previous.unwrap(),
-                        // context.instructions.len() - 2,
-                        context.end.unwrap(), // context.instructions.len() - 1,
-                                              // context.instructions.len() - 1,
-                    ),
-
+                    )
                 );
             }
             Expressions::Scope(new_scope) => {
-                println!("CONTEXT ID IS {:?}", context_id);
-                let mut new_block_id =
-                // if let None = blocks.last().unwrap().instructions.last() {
-                //     blocks.len() - 1
+                let mut new_block_id = if let Some(last) = block_frame.blocks.last() {
+                    if last.end.is_none() {
+                        block_frame.blocks.len() - 1
+                    } else {
+                        self.new_block(&mut block_frame.blocks, Some(current_block))
+                    }
+                } else {
+                    self.new_block(&mut block_frame.blocks, Some(current_block))
+                };
+                // if block_frame.blocks.last().unwrap().end.is_none() {
+                //     block_frame.blocks.len() - 1
                 // } else {
-                    self.new_block(blocks, Some(context_id));
+                //     self.new_block(&mut block_frame.blocks, Some(current_block))
+                // };
                 println!("AND NEW BLOCK ID IS {:?}", new_block_id);
                 // };
+                // self.new_block(&mut block_frame.blocks, Some(current_block));
 
-                // println!("NEW SCOPE!!!!!!!!!!!!!");
-                // let mut predecessors = context.predecessors.clone();
-                // predecessors.push(context.id);
-                // let new_block_id = self.new_block_with(context);
-                // let mut new_block = blocks[new_block_id].clone();
-
-                // println!(
-                //     "the predecessors of that block is {:?}",
-                //     new_block.predecessors
-                // );
-                // println!(
-                //     "the successors of this block is {:?}",
-                //     context.successors // blocks[context.id].successors
-                // );
-                // TODO: make ti so that this new block will only hjave direct predecessors
-                // as currently, it iwll contain the asme predecors as previopus bloick and the
-                // block aferr that and etc..
-                // and make it so that there can be predecessoors of this new block too!
-                // so that it doesnt always just use the same ol
-                // let mut new_block = blocks[blocks.len() - 1].clone();
-                // let index = new_block.id;
-                let mut first_id = new_block_id;
-                for expression in new_scope {
-                    // let new_block = &mut blocks[new_block_id];
-                    if let Some(obj) = self.build_instruction(instructions, blocks, new_block_id, expression, highest_variable, callback) {
-                        if blocks[blocks.len() - 1].size == 0 {
-                            blocks.pop();
+                let first_id = new_block_id;
+                let old_len = self.variables.len();
+                for expressions in new_scope {
+                    // this needs to build the latest block
+                    if let Some(new_id) = self.build_expression(expressions, block_frame, new_block_id) {
+                        println!("inner ----- changing block id {:?} to {:?}", new_block_id, new_id);
+                        // if block_frame.blocks[block_frame.blocks.len() - 1].size == 0 {
+                        //     block_frame.blocks.pop();
+                        // }
+                        let last_new_block_instruction = block_frame.blocks[new_id - 1].end.unwrap();
+                        match block_frame.instructions[last_new_block_instruction].data {
+                            InstructionData::JumpConditional(_ ,_ ,_) | InstructionData::Jump(_) => {},
+                            _ => {
+                                Self::add_instruction(block_frame, new_id - 1, InstructionData::Jump(new_id));
+                            }
                         }
-                        // blocks[new_block_id] = new_block;
-                        // new_block_id = self.new_block();
-                        // new_block = blocks[new_block_id].clone();
-                        new_block_id = self.new_block(blocks, Some(new_block_id));
+                        new_block_id = new_id;
                     }
-
-                    // println!("wow the instruction was {:?}", wow);
+                    // might need to do this check once done building expressions for a block
+                    // rather than after everything
+                    // println!("+++++ BLOCK ID {:?} HAS SIZE OF {:?}", block_frame.blocks.len() - 1,block_frame.blocks[block_frame.blocks.len() - 1].size  );
+                    println!("BLOCK FRAME SIZE OF {:?}", block_frame.blocks[block_frame.blocks.len() - 1].size);
                 }
-
-                // TODO: best case in performance would be not to have these blocks that are made by the if
-                // function that are untracked in the first place
-                if blocks[new_block_id].size == 0 {
-                    blocks.swap_remove(new_block_id);
-                }
-                // if !new_block.instructions.is_empty() {
-                // } else {
-                //     blocks.swap_remove(new_block_id);
+                // if block_frame.instructions[block_frame.blocks[new_block_id].end.unwrap()] {
+                //
                 // }
+                if block_frame.blocks[new_block_id].size == 0 {
+                    block_frame.blocks.swap_remove(new_block_id);
 
-                // context.successors.push(blocks.len());
+                    let start_id = block_frame.blocks[new_block_id - 1].end.unwrap();
+                    // println!(")))))))))))))))))))))))) wel you see the previouis daata was: {:?}", block_frame.instructions[start_id].data );
+                    match block_frame.instructions[start_id].data {
+                        InstructionData::JumpConditional(condition, true_block, false_block) => {
+                            // false_block = None;
+                            // block_frame.instructions[start_id].data = InstructionData::JumpConditional(condition, true_block, None);
+                        }
+                        InstructionData::Jump(new_block) => {
+                            Self::remove_instruction(block_frame, new_block - 1,  start_id);
+                        }
+                        _ => {}
+                    }
+                }
 
-                // split the current block instructions
-                // as previous block (context) does not garuantee that the new block (scope block) will be executed
-                // let split_block = self.new_block_with(context.id);
+                // make it so that variables are scope local
+                for var in old_len..self.variables.len() {
+                    self.variables.pop();
+                }
 
-                println!("!!!!!!!!!!!!!!!!!!!!!!!!!!! RETURNING TRUE");
                 return Some(first_id);
-                // need this to return a number..
             }
             Expressions::If(conditional, scope) => {
-                // maybe make a new block for the condition though i dont think that is nesscessary
-                // let condition
-                let first_scope = self.build_instruction(instructions, blocks, context_id, *conditional, highest_variable, callback);
-                let len = self.variables.len() - 1;
-                // let vars = &mut self.variables[len] ;
-                let old_varaibles = self.variables[len].len();
-                let scope = self.build_instruction(instructions, blocks, context_id, *scope, highest_variable, callback).unwrap();
-                for diff in old_varaibles..self.variables[len].len() {
-                    self.variables[len].pop();
+                println!("CURRENT BLOCK BEFORE: {:?}", current_block);
+                let first_scope = self.build_expression(*conditional, block_frame, current_block);
+                let new_scope_id = block_frame.blocks.len();
+                let scope = self.build_expression(*scope, block_frame, current_block);
+
+                let last_scope_instruction = block_frame.blocks[scope.unwrap()].end.unwrap();
+                match block_frame.instructions[last_scope_instruction].data {
+                    InstructionData::JumpConditional(_ ,_ ,_) | InstructionData::Jump(_) => {},
+                    _ => {
+                        // NOTE: if i were to add an esle block to the ifs make sure to eheck if
+                        // there will be an else block and then just jump past the else block
+                        Self::add_instruction(block_frame, scope.unwrap(), InstructionData::Jump(scope.unwrap() + 1));
+                    }
                 }
-                let mut new_block = self.new_block(blocks, None);
-                let context = &blocks[context_id];
+                println!("|||||||||||||||| LATEST SCOPE: {:?}", scope);
 
-                self.add_instruction(instructions, blocks,
-                    context.id,
+                let mut new_block = self.new_block(&mut block_frame.blocks, Some(current_block));
+                println!("CURRENT BLOCK: {:?}", current_block);
+                println!("new b lock is {:?}", new_block);
+                Self::add_instruction(
+                    block_frame,
+                    current_block,
                     InstructionData::JumpConditional(
-                        context.end.unwrap(),
-                        // context.instructions.len() - 1,
-                        scope,
-                        blocks.len() - 1, // blocks.len() - 1,
-                    ),
+                        block_frame.blocks[current_block].end.unwrap(),
+                        new_scope_id,
+                        // block_frame.blocks.len() - 1,
+                        new_block
+                        // block_frame.blocks.len()
+                    )
                 );
-                // context.instructions.push(Instruction::JumpConditional(
-                //     context.instructions.len() - 1,
-                //     scope,
-                //     blocks.len() - 1, // blocks.len() - 1,
-                // ));
 
-                println!("RETURNING BLOCK: {:?}",new_block);
-                // make it jump to the new block made thats after the if scope
-                // if the condition was false
+                return Some(new_block)
+            }
+            Expressions::ComparisonOperand(variant, left, right) => {
+                self.build_expression(*left, block_frame, current_block);
+                self.build_expression(*right, block_frame, current_block);
 
-                return Some(new_block);
+                Self::add_instruction(
+                    block_frame,
+                    current_block,
+                    InstructionData::ComparisonOperands(
+                        variant,
+                        block_frame.instructions[block_frame.blocks[current_block].end.unwrap()].previous.unwrap(),
+                        block_frame.blocks[current_block].end.unwrap(),
+                    )
+                );
             }
             Expressions::FunctionBlock(name, arguments, scope) => {
-                // let instruction_id = instructions.len();
-                // let context = &blocks[context_id];
-                // let function = functions.len();
 
-                let block = blocks.len();
-
-                let mut instruction_arguments: Vec<InstructionData> = Vec::with_capacity(arguments.len());
-                for argument in &arguments {
-                    println!("ARGUMENT IS {:?}", argument)
-                    // self.build_instruction(variables, instructionshighest_variable,
-                    // highest_variable, , blocks,
-                    //     context_id,
-                    //     function_id,
-                    //     argument,
-                    //     &mut |
-                    //     id,
-                    //     instruction| {
-                    //     println!("within the function block i am adding an rgument of {:?}", instruction);
-                    //     instruction_arguments.push(instruction);
-                    // });
-                }
-                let mut instruction_data: IndexVec<usize, InstructionData> = IndexVec::new();
-                // let function_definition = instructions.len();
-                // self.build_instruction(variables, instructions, blocks, functions, context_id, function_id, *scope, &mut |id, highest_variable, data| {
-                //     // self.add_instruction(instructions, blocks, block, data, function);
-                //     instruction_data.push(data);
-                // });
-
-                // self.add_instruction(instructions, blocks, , instruction, function)
-                let mut new_blocks = Vec::new();
-                // let mut new_instruction = index_vec![; arguments.len();
-                let mut new_instruction = IndexVec::new();
-                let mut new_variables = IndexVec::new();
-                // let mut new_variables = index_vec![String::new(); arguments.len()]; // might be expensive?
-                // let block = self.new_block(&mut new_blocks, None);
+                // let old_function_id = self.functions.len() - 1;
+                let mut new_variables = IndexVec::with_capacity(arguments.len());
                 for argument in arguments.iter().rev() {
-                    let Expressions::Variable(name) = argument else { panic!("argument not a variable") };
-                    // new_variables[arg_index] = name.to_string();
+                    let Expressions::Variable(name) = argument else { panic!("argument is not a variable") };
+
                     new_variables.push(name.to_string());
-                    *highest_variable += 1;
+                    self.highest_variable += 1;
                 }
                 self.variables.push(new_variables);
-                let scope_value = self.build_instruction(&mut new_instruction, &mut new_blocks, 0, *scope, highest_variable, callback);
+
+                let mut new_frame = BlockFrame::new(block_frame.id + 1, None);
+                let latest_function = self.functions.len();
+                let Expressions::Variable(name) = *name else { panic!() };
+                self.functions.push(Functions {
+                    name: Some(name.clone()), // TODO: anonymous functions
+                    frame: new_frame.clone(),
+                    predecessor_block: Some(current_block),
+                    predecessor_function: Some(block_frame.id),
+                    definition_id: block_frame.instructions.len(),
+                    upindex_amount: 0,
+                    id: block_frame.id + 1
+                });
+                // let new_frame = &mut self.functions[latest_function].frame;
+                // panic!("new frame is {:?}, current id is {:?}", new_frame.id, block_frame.id);
+                println!("_________________ ok so current id {:?}, nwo making new block __________________", block_frame.id);
+                self.build_expression(*scope, &mut new_frame, 0);
+                // println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!! block is of id {:?}")
+                // panic!("frame: {:?} instr {:?}", block_frame.id, block_frame.instructions);
                 for (arg_index, argument) in arguments.iter().enumerate() {
-                    let index = self.new_instruction(&mut new_instruction, InstructionData::Param(arg_index));
-                    self.insert_instruction(&mut new_instruction, &mut new_blocks, 0, None, index);
-                    // new_variables[arg_index] = name.to_string();
-                    // self.add_instruction(&mut new_instruction, &mut new_blocks, 0, InstructionData::Param(variables.len()));
-                    // new_variables.push(name.to_string());
-                    // self.new_instruction(&mut new_instruction, )
-                    // self.new_instruction(newins, instruction));
+                    Self::add_instruction(&mut new_frame, 0, InstructionData::Param(arg_index));
                 }
                 self.variables.pop();
-                // panic!("ok so new variables is {:?}", new_variables);
 
-                let Expressions::Variable(name) = *name else { panic!() };
-                let function = callback(
-                    Functions {
-                    name: Some(name.clone()),
-                    phi_instructions: IndexVec::new(),
-                    blocks: new_blocks,
-                    instructions: new_instruction,
-                    upvalues: Vec::new(),
-                    // variables: new_variables,
-                        number_params: arguments.len(),
-                        definition_location: 0,
-                        predecessor_block: 0,
-
-                });
+                // panic!("old frame id {:?}", old_frame_id);
 
 
-                // let vars = &mut self.variables[self.variables.len() - 1];
-                let len = self.variables.len() - 1;
-                self.add_instruction(instructions, blocks, context_id, InstructionData::Closure(function, self.variables[len].len()));
-                self.variables[len].push(name);
-                *highest_variable += 1;
-                // self.new_block(function_id, None);
-                println!("OUTPUT OF SCOPE THINGY IN FUNCTION {:?}", scope_value);
-                let mut instructions_start = instructions.len() - 1;
-                // functions.push(Functions {
-                //     name: Some(name),
-                //     phi_instructions: IndexVec::new(),
-                //     blocks: Vec::new(),
-                //     instructions: IndexVec::new(),
-                //     upvalues: Vec::new(),
-                //     variables: IndexVec::new(),
-                // });
-                for data in instruction_data {
-                    let id = self.add_instruction(instructions, blocks, block, data);
-                    // instructions.push(instructions[id].clone()); // dont know naything better
-                    // than a clone
-                }
-                let mut instructions_end = instructions.len() - 1;
-
-                // if let InstructionData::Return(_) = instructions[instructions_end].data {
-                // } else {
-                //     self.add_instruction(instructions, blocks, instructions_end, instruction, function)
-                //     instructions_end += 1;
+                // let start_id = block_frame.blocks[new_block_id - 1].end.unwrap();
+                // match block_frame.instructions[start_id].data {
+                //     InstructionData::JumpConditional(condition, true_block, false_block) => {
+                //         // false_block = None;
+                //         block_frame.instructions[start_id].data = InstructionData::JumpConditional(condition, true_block, None);
+                //     }
+                //     InstructionData::Jump(new_block) => {
+                //         Self::remove_instruction(&mut block_frame.instructions, &mut block_frame.blocks[new_block - 1],  start_id);
+                //     }
+                //     _ => {}
                 // }
+                //
+                // println!("!!!! id is {:?}, while the block frame id is {:?}", id, block_frame.id);
+                // panic!("ok so in block frame old: {:?} new {:?}", old_frame_id, id);
 
+                let len = self.variables.len() - 1;
+                self.functions[latest_function].frame = new_frame;
+                println!("VVVV -> self variables {:?}", self.variables);
+                Self::add_instruction(block_frame, current_block, InstructionData::Closure(block_frame.id + 1, self.variables[len].len()));
+                self.variables[len].push(name);
+                self.highest_variable += 1;
+                Self::add_instruction(block_frame, current_block, InstructionData::Jump(block_frame.blocks.len()));
+                // panic!("frame: {:?}", block_frame.id);
+                return Some(self.new_block(&mut block_frame.blocks, Some(current_block)));
 
-                return Some(blocks.len() - 1);
-
-                // arguments is merely a lsit of variable isntructions that would be used
-
-                // function blocks will be inserted within blocks
             }
             Expressions::CallFunction(function_variable, variadic) => {
                 if *function_variable == Expressions::Variable("print".to_string()) {
-                    self.build_instruction(instructions, blocks, context_id, variadic[0].clone(), highest_variable, callback);
+                    self.build_expression(variadic[0].clone(), block_frame, current_block);
                     // panic!("the value of variadic: {:?}", variadic);
-                    let context = &blocks[context_id];
-
-
                     println!("within print!!");
-                    self.add_instruction(instructions, blocks,
-                        context.id,
-                        InstructionData::Print(context.end.unwrap()),
+                    Self::add_instruction(block_frame,
+                        current_block,
+                        InstructionData::Print(block_frame.blocks[current_block].end.unwrap()),
                     );
 
                     return None;
                 }
-                // let mut new_function_id = 0;
-                println!("got {:?} and {:?}", function_variable, variadic);
-                // for (index, function) in functions.iter().enumerate() {
-                //     println!("matching {:?} with {:?}", function.name, function_variable);
-                //     if let Some(name) = &function.name {
-                //         if *function_variable == Expressions::Variable(name.to_string()) {
-                //             new_function_id = index;
-                //         }
-                //     }
-                // }
 
-                // if new_function_id == 0 {
-                //     panic!("No function with name {:?} was found", function_variable);
-                // }
                 let mut variadic_vec = Vec::with_capacity(variadic.len());
-                for variable in &variadic {
-                    self.build_instruction(instructions, blocks, context_id, variable.clone(), highest_variable, callback);
-                    variadic_vec.push(instructions.len() - 1);
+                for variable in variadic {
+                    self.build_expression(variable, block_frame, current_block);
+                    variadic_vec.push(block_frame.instructions.len() - 1);
+                    // IMPORTANT: could just use a variadic start position and len as the count instead of
+                    // iterating over this
                 }
-                self.build_instruction(instructions, blocks, context_id, *function_variable, highest_variable, callback);
-                // let Exp new_function_id
-                // println!("instructions is {:?}", instructions);
-                println!("ok so it is now {:?}", instructions[instructions.len() - 1].data);
-                // let InstructionData::Closure(closure_value) = instructions[instructions.len() - 1].data else { panic!("not a closure!!") };
-                self.add_instruction(instructions, blocks, context_id, InstructionData::CallFunction(instructions.len() - 1, variadic_vec));
+                self.build_expression(*function_variable, block_frame, current_block);
+
+                Self::add_instruction(block_frame, current_block, InstructionData::CallFunction(block_frame.instructions.len() - 1, variadic_vec));
             }
             e => {
-                println!("instruction {:?}, not yet implemented", e);
+                panic!("instruction {:?}, not yet implemented", e);
             }
         }
 
         None
-        // should change block?
-        // None
-        // context.instructions.push(instruction);
     }
 
-    pub fn post_order(
-        &self,
-        function: &Functions,
-        // block: &Block,
-        block_id: usize,
-        // blocks: &mut Vec<Block>,
-        // instructions: &mut IndexVec<usize, Instruction>,
-        current_post_order: &mut Vec<usize>,
-        visited: &mut IndexVec<usize, bool>
-    ) {
 
-        current_post_order.push(block_id);
-
-        println!("this function ahs {:?} blocks ", function.blocks.len());
-        function.blocks[block_id].get_successors(
-            &function.instructions,
-            |successor, _| {
-                println!("succesor {:?}", successor);
-                if !visited[successor] {
-                    visited[successor] = true;
-                    // [successor]
-                    // dont know if i cna do something about this clone
-                    self.post_order(function, successor, current_post_order, visited);
-                }
-
+    fn get_outer_function(functions: &IndexVec<usize, Functions>, function_id: usize, requested_id: usize) -> usize {
+        let previous_function = &functions[function_id];
+        if let Some(prev) = previous_function.predecessor_function {
+            if prev == requested_id {
+                return function_id;
             }
-        );
-        // self.get_successors(
-        //     instructions,
-        //     block,
-        //     // &blocks[block_id],
-        // });
+            return Self::get_outer_function(functions, prev, requested_id);
+        }
+        function_id
     }
-
-    pub fn build_dominance(
-        &self,
-        blocks: &mut Vec<Block>,
-        predecessors: &IndexVec<usize, IndexVec<usize, usize>>,
-        post_order: Vec<usize>
-    ) -> IndexVec<usize, usize> {
-        // dominance - block id, vector of block ids
-        // TODO: i dont know if this is correct
-        // but iterate over reverse *post* order
-        // due to this, the language cannot have a `goto` statement
-        // should look into adding something similar to a goto, or fulfills a similar purpose
-
-        let mut changed = true;
-
-        // let post_order = vec![0, 1, 4, 5, 2, 3, 6];
-        // let post_order = {
-        //
-        //     let mut current_order = Vec::new(); //maybe make it wiht the capacity of all blocks?
-        //     let mut visited = index_vec!(false; blocks.len());
-        //
-        //
-        //     self.post_order(0, &mut current_order, &mut visited);
-        //
-        //     current_order
-        // };
-
-        let post_indices = {
-            let mut indices = index_vec!(None; blocks.len());
-            println!("BLOCK LEN: {:?}", blocks.len());
-            for thing in &mut *blocks {
-                println!("      there is {:?}", thing.id);
-            }
-            for (index, block) in post_order.iter().enumerate() {
-                println!("INDICE: {:?} HAS BLOCK: {:?}", index, block);
-                indices[*block] = Some(index);
-            }
-
-            indices
-        };
-        println!("//////////////////////////////////////");
-        for thing in &post_order {
-            println!("POST ORDER IS {:?}", thing);
-        }
-
-        let mut domination = index_vec!(None; post_order.len());
-
-        domination[0] = Some(0);
-        let mut changed = true;
-
-        while changed {
-            changed = false;
-
-            for block_id in post_order.iter().rev().copied() {
-                if block_id == 0 {
-                    continue;
-                }
-
-                let block = &blocks[block_id];
-                let preds = &predecessors[block_id];
-                // println!("BLOCK THINGY HAS {:?} SIZE AND {:?}", block.size, block.previous_block);
-                println!("preds 0 was {:?} for block {:?}", preds[0], block_id);
-
-                let mut new_dom = post_indices.get(preds[0]).unwrap().expect("wow"); // mighjt be erorr
-                // prone?
-
-                println!(
-                    "block: {:?} has predecessors {:?}, and the first one is {:?}",
-                    block.id,
-                    predecessors.len(),
-                    new_dom
-                );
-                // TODO: rewrite this whole thing
-                for predecessor in preds.iter().skip(1).copied() {
-                    println!(" || PREDECESSOR: {:?} OF BLOCK {:?}", predecessor, block_id);
-                    let Some(Some(pred)) = post_indices.get(predecessor) else {
-                        continue;
-                    };
-                    let pred = *pred;
-                    if domination[pred].is_some() {
-                        let mut x = new_dom;
-                        let mut y = pred;
-                        println!("what checking x: {:?} || and then y is: {:?}", x, y);
-
-                        while x != y {
-                            println!("loop 1");
-                            while x < y {
-                                println!(
-                                    "loop 2 where x: {:?} and domination x is {:?}",
-                                    x, domination[x]
-                                );
-                                // NOTE: i have no clue if i should do this but when x is 0 that
-                                // means its domination is also 0 which results in an infinite loop
-                                // where x will never be bigger than y (which is 1)
-                                if x == 0 {
-                                    println!("x is 0 breaking");
-                                    break;
-                                }
-                                x = domination[x].unwrap();
-                            }
-                            while y < x {
-                                println!("loop 3");
-                                y = domination[y].unwrap();
-                            }
-                            if x == 0 {
-                                println!("x is 0 breaking 2");
-                                break;
-                            }
-                        }
-
-                        new_dom = x;
-                    }
-                }
-
-                let block_indice = post_indices.get(block_id).unwrap().expect("wow");
-                println!("block indice: {:?}", block_indice);
-                println!("||||||||| DOMINANCE: {:?}", domination);
-                if domination[block_indice] != Some(new_dom) {
-                    println!("ADDING {:?} TO INDICE: {:?}", new_dom, block_indice);
-                    domination[block_indice] = Some(new_dom);
-                    changed = true;
-                }
-            }
-        }
-        // let domination = index_vec!(Some(0), Some(0), Some(0), Some(1), Some(3), Some(0));
-
-        // for dommy in &domination {
-        //     println!("DOMINIATION {:?}", dommy);
-        // }
-        let mut output = IndexVec::with_capacity(blocks.len());
-        for block in blocks {
-            if let Some(Some(post_index)) = post_indices.get(block.id) {
-                println!("got indice: {:?}, current block {:?}", post_index, block.id);
-                if let Some(immediate_index) = domination[*post_index] {
-                    output.push(post_order[immediate_index]);
-                }
-                // immediate_index = domination[*post_index];
-            }
-        }
-
-        output
-
-        // for block in self.blocks.iter() {
-        //     let mut predecessor_dominance = Vec::with_capacity(block.predecessors.len());
-        //     let mut output_dominance = vec![block.id];
-        //
-        //     for predecessor in &block.predecessors {
-        //         if let Some(dominators) = dominance.get(*predecessor) {
-        //             predecessor_dominance.push(dominators);
-        //         }
-        //     }
-        //
-        //     if let Some(pred) = predecessor_dominance.first() {
-        //         'outer_dom: for dominator in pred.iter() {
-        //             let mut iter = predecessor_dominance.iter();
-        //             iter.next();
-        //             for other_dominator in iter {
-        //                 if (*other_dominator).contains(dominator) {
-        //                     output_dominance.push(*dominator);
-        //                     continue 'outer_dom;
-        //                 }
-        //             }
-        //         }
-        //     }
-        //
-        //     dominance[block.id] = output_dominance;
-        // }
-    }
-
-    // IMPORTANT: finish dominence frontiers!!!!
-    // NOTE: maybe dominance tree as its also a useful utility?
-    pub fn dominance_frontiers(
-        &self,
-        blocks: &mut Vec<Block>,
-        dominance: &IndexVec<usize, usize>,
-        predecessors: &IndexVec<usize, IndexVec<usize, usize>>,
-    ) -> IndexVec<usize, Vec<usize>> {
-        let mut frontier = index_vec!(vec![]; blocks.len());
-
-        for dommy in dominance {
-            println!("!!! immediate dommy {:?}", dommy);
-        }
-        for block in blocks {
-            let block_predecessors = &predecessors[block.id];
-            // if block_predecessors.len() < 2 {
-            //     continue;
-            // }
-
-            let Some(dominator) = dominance.get(block.id) else {
-                println!("no exist on block id {:?}", block.id);
-                continue;
-            };
-
-            for predecessor in block_predecessors {
-                if dominance.get(*predecessor).is_none() {
-                    println!("its none on dominance {:?}", predecessor);
-                    continue;
-                }
-
-                let mut at = predecessor;
-                println!("CHECKING {:?} == {:?}", at, dominator);
-                while at != dominator {
-                    let dominance_frontier = &mut frontier[*at];
-                    // println!(
-                    //     "      CHECKING INNER {:?} == {:?} || WITH FRONTIER: {:?} || BLOCK ID {:?}",
-                    //     at,
-                    //     dominator,
-                    //     dominance.get(*at),
-                    //     block.id
-                    // );
-                    if !dominance_frontier.contains(&block.id) {
-                        // println!("adding dominance frontgier");
-                        dominance_frontier.push(block.id);
-                    }
-                    // println!("at is {:?} dominator is {:?}", at, dominator);
-
-                    at = dominance.get(*at).unwrap();
-                }
-            }
-        }
-
-        println!("so the dominacne fronteir looks like this {:?}", frontier);
-
-        frontier
-    }
-
-    pub fn make_dominance_tree(
-        &self,
-        blocks: &mut Vec<Block>,
-        dominance: IndexVec<usize, usize>,
-    ) -> IndexVec<usize, Vec<usize>> {
-        let mut tree = index_vec![Vec::new(); blocks.len()];
-
-        for block in blocks.iter().skip(1) {
-            if let Some(dominator) = dominance.get(block.id) {
-                tree[*dominator].push(block.id);
-            }
-        }
-
-        tree
-    }
+    // fn get_function_offset(&self, function_id: usize, requested_id: usize, amount: &mut usize) -> usize {
+    //     let previous_function = &self.functions[function_id];
+    //     if let Some(prev) = previous_function.predecessor_function {
+    //         if prev == requested_id {
+    //             return function_id;
+    //         }
+    //         *amount += 1;
+    //         return self.get_function_offset(prev, requested_id, amount);
+    //     }
+    //     function_id
+    // }
 
     pub fn make_ssa(
         &mut self,
-        phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        variable_len: usize,
-        dominance_frontier: IndexVec<usize, Vec<usize>>,
-        dominance_tree: &IndexVec<usize, Vec<usize>>,
-        predecessors: &IndexVec<usize, IndexVec<usize, usize>>,
-    ) {
-        let mut phis = {
-            let mut visited =
-                index_vec!(index_vec!(false; variable_len); blocks.len());
+        frame: &mut BlockFrame,
+        dominance_frontier: IndexVec<usize, IndexVec<usize, Option<(usize, usize)>>>,
+    ) -> IndexVec<usize, Vec<(usize, usize)>> {
+        let mut temporary_phi: Vec<(usize, Option<(usize, usize)>, usize, (usize, usize))> = Vec::new();
+        // let mut new_names: IndexVec<usize, Option<(usize, usize)>> = index_vec![None; self.highest_variable];
+        let mut new_names: IndexVec<usize, IndexVec<usize, Option<usize>>> = index_vec![ IndexVec::new(); self.functions.len()];
+        // let mut phi_indexes = IndexVec::new();
+        // might be allocating too much?
+        // let mut phi_indices = index_vec![None; self.];
 
-            let mut stack = Vec::new();
-            for block in &mut *blocks {
-                self.for_block(block, instructions, |instruction| {
-                    // instructions that set a variable
-                    match instruction.data {
-                        InstructionData::SetVariable(id, _) => {
-                            if !visited[block.id][id] {
-                                visited[block.id][id] = true;
-                                stack.push((block.id, id));
+        let mut removed_instructions = Vec::new();
+        let mut phi_map: IndexVec<usize, Vec<(usize, usize)>> = IndexVec::new();
+        let mut inserted_phis = Vec::new();
+        // let mut function_phis = Vec::new();
+
+        // which functions have upindexes
+        let mut has_upindex: IndexVec<usize, Vec<(usize, usize)>> = index_vec![ Vec::new(); self.functions.len() ];
+        let mut previous_function = 0;
+        // IMPORTANT: make functions swork alter right now the functions in conditionals dont
+        // proprely get put out
+        for block in &mut frame.blocks {
+            let mut removed_anything = false;
+            self.for_block_mut(0, block.id, &mut |functions, function_id, instruction_id| {
+                // if function_id != 0 {
+                //     panic!("not 0 id {:?}", function_id);
+                // }
+                let instr = &functions[function_id].frame.instructions[instruction_id];
+                let block_id = instr.block.unwrap();
+                if instr.previous.is_none() && !removed_anything {
+                    for (id, frontier, _, replacement_id) in temporary_phi.iter() {
+                        if let Some((frontier_block, frontier_function)) = frontier {
+                            if function_id == *frontier_function && block_id == *frontier_block {
+                                if let Some(name_id) = new_names[*frontier_function].get_mut(*id) {
+                                    *name_id = Some(replacement_id.1);
+                                    // name_id = Some((*frontier_function, replacement_id.1));
+                                } else {
+                                    new_names[*frontier_function].resize(*id, None);
+                                    new_names[*frontier_function][*id] = Some(replacement_id.1);
+                                }
+                                inserted_phis.push((replacement_id.1, *id));
+                            }
+                        } else {
+                            // new_names[*id] = Some(*replacement_id);
+                            if let Some(name_id) = new_names[replacement_id.0].get_mut(*id) {
+                                *name_id = Some(replacement_id.1);
+                                // name_id = Some((*frontier_function, replacement_id.1));
+                            } else {
+                                new_names[replacement_id.0].resize(*id, None);
+                                new_names[replacement_id.0][*id] = Some(replacement_id.1);
+                            }
+                            // inserted_phis.push((replacement_id.1, *id));
+                            // println!(";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; once {:?} {:?}", instruction_id, inserted_phis.len());
+                            // panic!("once");
+                            // panic!("adding replacement id {:?} to {:?}", replacement_id, id);
+                            // inserted_phis.push((replacement_id.1, *id));
+                        }
+                    }
+
+                    // dont know how else to do it other than 2 loops
+                    for (id, frontier, map_id, replacement) in temporary_phi.iter() {
+                        if let Some((frontier_block, frontier_function)) = frontier {
+                            if let Some((current_block, current_function)) = dominance_frontier[0][block.id] {
+                                if current_function == function_id && current_block == *frontier_block {
+                                    for (instruction_id, var_id) in &inserted_phis {
+                                        if var_id == id {
+                                            phi_map[*map_id].push((0, *instruction_id));
+                                        }
+                                    }
+                                }
+                            } else {
+
+                            }
+                        } else if dominance_frontier[function_id][block.id].is_none() && replacement.0 == function_id {
+                            for (instruction_id, var_id) in &inserted_phis {
+                                if var_id == id {
+                                    phi_map[*map_id].push((0, *instruction_id));
+                                }
+
                             }
                         }
-                        InstructionData::Closure(_, id) => {
-                            println!("i found a closure instruction");
-                            if !visited[block.id][id] {
-                                println!("it ahsnt been visited");
-                                visited[block.id][id] = true;
-                                stack.push((block.id, id));
+                    }
+                    if !inserted_phis.is_empty()  {
+                        inserted_phis.clear();
+                    }
+                }
+                match functions[function_id].frame.instructions[instruction_id].data {
+                    InstructionData::SetVariable(id, to_value) => {
+                        let block_id = functions[function_id].frame.instructions[instruction_id].block.unwrap();
+                        for (var_id, frontier, map_id, _) in temporary_phi.iter().rev() {
+                            if *var_id == id {
+                                // NOTE: might not even need this iflet checking
+                                // since it wi.ll only be none in the tarrt and end blocks wherer
+                                // convergence is impossible
+                                if let Some((front_block, front_function)) = frontier {
+                                    if *front_function == function_id {
+                                        if dominance_frontier[function_id][block_id].unwrap().0 == *front_block {
+                                            phi_map[*map_id].push((function_id, to_value));
+                                            Self::remove_instruction(&mut functions[function_id].frame, block_id, instruction_id);
+                                            removed_anything = true;
+                                            if let Some(name_id) = new_names[function_id].get_mut(id) {
+                                                *name_id = Some(to_value);
+                                                // name_id = Some((*frontier_function, replacement_id.1));
+                                            } else {
+                                                new_names[function_id].resize(id, None);
+                                                new_names[function_id][id] = Some(to_value);
+                                            }
+                                            // old
+                                            // new_names[id] = Some((function_id, to_value));
+                                            return;
+                                        } else {
+                                            panic!(" for phi {:?} frontier was none.. ", var_id)
+                                        }
+                                    } else {
+                                        // NOTE: think later if functions are correct
+                                        panic!("yueah");
+                                        // let function_definition = Self::get_outer_function(functions, *front_function, function_id);
+                                        // phi_map[*map_id]
+                                    }
+                                }
                             }
                         }
-                        InstructionData::SetUpvalue(function, id, value) => {
-                            if !visited[block.id][id] {
-                                visited[block.id][id] = true;
-                                stack.push((block.id, id));
+
+                        if let Some(name_value) = new_names[function_id].get(id) {
+                            if let Some(name_value) = name_value {
+                                temporary_phi.push((id, dominance_frontier[function_id][block_id], phi_map.len(), (function_id, instruction_id)));
+                                functions[function_id].frame.instructions[instruction_id].data = InstructionData::Phi(phi_map.len());
+                                phi_map.push(vec![(function_id, *name_value), (function_id, to_value)]);
                             }
+                        } else {
+                            Self::remove_instruction(&mut functions[function_id].frame, block_id, instruction_id);
+                            removed_anything = true;
+                            new_names[function_id].resize(id + 1, None);
+                            // panic!("this doesnt owrk id {:?} function {:?}", instruction_id, function_id)
                         }
-                        _ => {}
+                        new_names[function_id][id] = Some(to_value);
+                        // if let Some((original_function, original)) = new_names[id] {
+                        //     temporary_phi.push((id, dominance_frontier[function_id][block_id], phi_map.len(), (function_id, instruction_id)));
+                        //     functions[function_id].frame.instructions[instruction_id].data = InstructionData::Phi(phi_map.len());
+                        //     phi_map.push(vec![(original_function, original), (function_id, to_value)]);
+                        // } else {
+                        //     Self::remove_instruction(&mut functions[function_id].frame.instructions, block, instruction_id);
+                        //     removed_anything = true;
+                        // }
+                        // new_names[id] = Some((function_id, to_value));
                     }
-                });
-            }
+                    InstructionData::SetUpvalue(func_id, id, to_value) => {
+                        // removed_anything = true;
+                        // // new_names[function_id][id] = Some(functions[func_id].frame.instructions.len() - 1);
+                        // if let Some(name_id) = new_names[function_id].get_mut(id) {
+                        //     *name_id = Some(functions[function_id].frame.instructions.len());
+                        //     // name_id = Some((*frontier_function, replacement_id.1));
+                        // } else {
+                        //     new_names[function_id].resize(id + 1, None);
+                        //     new_names[function_id][id] = Some(functions[function_id].frame.instructions.len());
+                        // }
+                        // panic!("new names is {:?} with id of {:?} in function {:?}", new_names[function_id][id], id, function_id);
+                        // panic!("ok so len: {:?}", functions[func_id].frame.instructions.len() - 1);
+                        let mut first_upindex = None;
+                        println!("hello there");
+                        Self::function_tree(functions, function_id, func_id, &mut |current_id, functions, previous_function| {
+                            println!("------- function {:?}", current_id);
+                            for var_id in has_upindex[*current_id].iter().rev() {
+                                if var_id.0 == id {
+                                    if first_upindex.is_none() {
+                                        first_upindex = Some(var_id.1)
+                                    }
+                                    return;
+                                }
+                            }
+                            println!("+++++ other ok so previosu function is {:?} current is {:?}", previous_function, current_id);
+                            let upindex = if previous_function == Some(func_id) {
+                                Self::new_instruction(&mut functions[*current_id].frame.instructions, InstructionData::Upindex(func_id, new_names[func_id][id].unwrap()))
+                            } else {
+                                let new_instruction = functions[previous_function.unwrap()].frame.instructions.len();
+                                Self::new_instruction(&mut functions[*current_id].frame.instructions, InstructionData::Upindex(previous_function.unwrap(), new_instruction))
+                                // panic!("ok so new instruction is {:?}", new);
+                                // panic!("ok so current id {:?}, current fucntion id {:?}, requested: {:?}", new, function_id, current_id);
+                            };
+                            let new_frame = &mut functions[*current_id].frame;
+                            let first_instr = &new_frame.blocks[0].start;
+                            Self::insert_instruction(new_frame, 0, new_frame.instructions.len() - 1, None, *first_instr);
+                            has_upindex[*current_id].push((id, upindex));
+                            if first_upindex.is_none() {
+                                first_upindex = Some(upindex);
+                            }
+                        });
+                        println!("new names is {:?} funci d is {:?}", new_names, function_id);
+                        functions[function_id].frame.instructions[instruction_id].data = InstructionData::SetUpindex(to_value, first_upindex.unwrap());
+                        // instr.data =
+                        // // println!(".............. ok so {:?} == {:?}", block_id, functions[instruction_id].frame.instructions[instruction_id].block);
+                        // // Self::remove_instruction(&mut functions[function_id].frame.instructions, block, instruction_id);
+                        // // functions[function_id].frame.blocks[block.id] = block.clone();
+                        //
+                        // let InstructionData::Upindex(original_function, original_id) = functions[function_id].frame.instructions[new_names[function_id][id].unwrap()].data else {
+                        //     panic!("phi set upvalue doesnt refer to an upindex??")
+                        // };
+                        //
+                        // // panic!("UPINDEX REFERS TO FUNCTION {:?} ID {:?}", original_function, original_id);
+                        //
+                        //
+                        // // panic!("dominance fronteir is {:?}",dominance_frontier[function_id][block_id]);
+                        // // if dominance_frontier[function_id][block_id].is_none() {
+                        //     // println!("temporaries: {:?}", temporary_phi);
+                        // let mut has_found = false;
+                        // // for (var_id, frontier, map_id, _) in temporary_phi.iter().rev() {
+                        // //     for (object_function, object_id) in &phi_map[*map_id] {
+                        // //         if *object_id == original_id {
+                        // //             has_found = true;
+                        // //             break;
+                        // //         }
+                        // //     }
+                        // //     // panic!("has found is {:?}", has_found);
+                        // //     if has_found {
+                        // //         phi_map[*map_id].push((function_id, to_value));
+                        // //         removed_anything = true;
+                        // //         break;
+                        // //     // } else {
+                        // //         // phi_map[*map_id].push((function_id, to_value));
+                        // //     }
+                        // //     // BUG: i have no clue if this shoiuld or shouldnt break
+                        // // }
+                        //     // panic!("has found is {:?}", has_found);
+                        //
+                        // if !has_found {
+                        //     let new_instr = Self::new_instruction(&mut functions[original_function].frame.instructions, InstructionData::Phi(phi_map.len()));
+                        //     temporary_phi.push((id, dominance_frontier[function_id][block_id], phi_map.len(), (original_function, new_instr)));
+                        //     // functions[function_id].frame.instructions[instruction_id].data = InstructionData::Phi(phi_map.len());
+                        //     phi_map.push(vec![(original_function, original_id), (function_id, to_value)]);
+                        // }
+                        // Self::remove_instruction(&mut functions[function_id].frame.instructions, block, instruction_id);
+                        // // }
+                        //
+                        // // IMPORTANT: DO NOT FORTGET THAT `NONE` DOMINANCE FRONTIERS MEAN TAHT
+                        // // THEY PASS THROUGH THE WHOLE PROGRAM
+                        // new_names[function_id][id] = Some(to_value);
 
-            let mut phis: IndexVec<usize, Vec<(usize, Vec<(usize, Option<usize>)>, usize)>> =
-                index_vec!(vec![]; blocks.len());
-
-            let mut map_size = 0;
-            while let Some((from_block, variable_id)) = stack.pop() {
-                for to_block in dominance_frontier[from_block].iter().copied() {
-                    let mut to_phis = &mut phis[to_block];
-
-                    // checks if this variable does not have a phi instruction already added within
-                    // this block
-                    let is_new = to_phis
-                        .iter()
-                        .find(|(num, _, _)| num == &variable_id)
-                        .is_none();
-                    if is_new {
-                        let predecessor = &predecessors[to_block];
-                        // let predecessor = &block_predecessors;
-                        // variable_id isntead??
-
-                        let map = predecessor.iter().map(|pred| (*pred, None)).collect();
-                        let phi = self.new_instruction(instructions, InstructionData::Phi(0));
-                        // self.phi_instructions.push()
-                        // map_size += 1;
-
-                        // TODO: try not to clone
-                        to_phis.push((
-                            variable_id,
-                            map,
-                            phi, // predecessor.clone(),
-                                 // self.phi_instructions.len(),
-                        ));
-
-                        // to_block now defines a variable
-                        if !visited[from_block][variable_id] {
-                            visited[from_block][variable_id] = true;
-                            stack.push((from_block, variable_id));
+                        // new_names[id] = Some((function_id, to_value));
+                    }
+                    InstructionData::GetVariable(id) => {
+                        println!("MMMMM current function id {:?}, adding {:?} and {:?} to removed", function_id, instruction_id, new_names[id]);
+                        println!("instr data: next: {:?} prev: {:?}, block start: {:?} block end {:?}", instr.next, instr.previous, block.start, block.end);
+                        removed_instructions.push((function_id, instruction_id, new_names[function_id][id]));
+                        println!("its here with block id {:?}", block_id);
+                        let frame = &mut functions[function_id].frame;
+                        Self::remove_instruction(frame, block_id, instruction_id);
+                        // functions[function_id].frame.blocks[block.id] = block.clone();
+                        removed_anything = true;
+                        println!("after -> instr data: next: {:?} prev: {:?}, block start: {:?} block end {:?}",
+                            functions[function_id].frame.instructions[instruction_id].next,
+                            functions[function_id].frame.instructions[instruction_id].previous,
+                            block.start,
+                            block.end
+                        );
+                        // NOTE: might not need this
+                    }
+                    InstructionData::Closure(new_function, id) => {
+                        if let Some(new_name) = new_names[function_id].get_mut(id) {
+                            *new_name = Some(instruction_id)
+                        } else {
+                            new_names[function_id].resize(id + 1, None);
+                            new_names[function_id][id] = Some(instruction_id);
                         }
-                        // let map = predecessor.iter().map(|predecessor_id| predecessor_id).collect();
+                        // new_names[id] = Some((function_id, instruction_id));
                     }
+                    InstructionData::Upvalue(func_id, id) => {
+                        let mut first_upindex = None;
+                            // let current_instr
+                        // if let Some(next) = instr.next {
+                        //     // functions[function_id].frame.instructions[].next = functions[function_id].frame.instructions[instruction_id].next;
+                        //     if let Some(prev) = functions[function_id].frame.instructions[next].previous {
+                        //         functions[function_id].frame.instructions[next].previous = first_upindex;
+                        //     }
+                        //
+                        // }
+                        Self::remove_instruction(&mut functions[function_id].frame, block_id, instruction_id);
+                        // panic!("OK SO DATA NOW {:?}", functions[function_id].frame.instructions[instruction_id]);
+                        // panic!("OK SO BLOCK START NOW {:?}, current id {:?}", functions[function_id].frame.blocks[block_id].start, instruction_id);
+                        Self::function_tree(functions, function_id, func_id, &mut |current_id, functions, previous_function| {
+                            for var_id in has_upindex[*current_id].iter().rev() {
+                                if var_id.0 == id {
+                                    if first_upindex.is_none() {
+                                        first_upindex = Some(var_id.1);
+                                    }
+                                    return;
+                                }
+                            }
+                            println!("+++++ ok so previosu function is {:?} current is {:?}", previous_function, current_id);
+                            let upindex = if previous_function == Some(func_id) {
+                                Self::new_instruction(&mut functions[*current_id].frame.instructions, InstructionData::Upindex(func_id, new_names[func_id][id].unwrap()))
+                            } else {
+                                let new_instruction = functions[previous_function.unwrap()].frame.instructions.len();
+                                Self::new_instruction(&mut functions[*current_id].frame.instructions, InstructionData::Upindex(previous_function.unwrap(), new_instruction))
+                                // panic!("ok so new instruction is {:?}", new);
+                                // panic!("ok so current id {:?}, current fucntion id {:?}, requested: {:?}", new, function_id, current_id);
+                            };
+                            let new_frame = &mut functions[*current_id].frame;
+                            let first_instr = &new_frame.blocks[0].start;
+                            Self::insert_instruction(new_frame, 0, new_frame.instructions.len() - 1, None, *first_instr);
+                            has_upindex[*current_id].push((id, upindex));
+                            if first_upindex.is_none() {
+                                first_upindex = Some(upindex);
+                            }
+                        });
+
+                        // functions[function_id].frame.instructions[instruction_id].data = InstructionData::Upindex(func_id, ())
+                        // functions[function_id].frame.blocks[block.id] = block.clone();
+                        // panic!("OK SO UPVALUE DATA: {:?} NEXT: {:?} IN BLOCK {:?}", instr.previous, instr.next)
+                        // println!("before upvalue");
+                        // new_names[function_id][id] = first_upindex;
+                        // if let Some(new_name) = new_names[function_id].get_mut(id) {
+                        //     *new_name = first_upindex
+                        // } else {
+                        //     new_names[function_id].resize(id + 1, None);
+                        //     new_names[function_id][id] = first_upindex;
+                        // }
+                    }
+                    _ => {}
                 }
-            }
-
-            phis
-        };
-
-        // rename variables
-        {
-            fn visit(
-                block_id: usize,
-                blocks: &mut Vec<Block>,
-                instructions: &mut IndexVec<usize, Instruction>,
-                mut new_names: IndexVec<usize, Option<usize>>,
-                phis: &mut IndexVec<usize, Vec<(usize, Vec<(usize, Option<usize>)>, usize)>>,
-                // IndexVec<usize, Vec<(usize, IndexVec<usize, usize>, usize)>>,
-                dominance_tree: &IndexVec<usize, Vec<usize>>,
-                module: &mut Module,
-            ) {
-                let block = &mut blocks[block_id];
-                for (variable_id, _map, instruction) in &phis[block.id] {
-                    new_names[*variable_id] = Some(*instruction);
-                }
-
-                // println!("the length of instructions: {:?}", block.instructions.len());
-                // println!("block id is {:?}", block.id);
-                // let mut index = 0;
-                block.for_instruction_mut(instructions, |instr_id,  new_instructions, new_block| {
-                    match new_instructions[instr_id].data {
-                        // IMPORTANT: instructions might not be proprely applying due to
-                        // cloning
-                        InstructionData::GetVariable(id) => {
-                            println!("got it for variable {:?}", id);
-                            // println!("current index: {:?}", index);
-                            let new_name = new_names[id].unwrap();
-                            // println!("new name: {:?}", new_name);
-                            // TOOD: make a copy instruction
-                            // FIXME: get some sort of way to get the id of the id of the
-                            // instruction
-                            new_names[id] = Some(instr_id);
-                            println!(
-                                "ok its after set and the value for both is: old: {:?} | new: {:?}",
-                                new_name, new_names[id]
-                            );
-                            new_instructions[instr_id].data = InstructionData::Copy(new_name);
-                        }
-
-                        InstructionData::SetVariable(id, to_value) => {
-                            println!("set var to id: {:?} and {:?}", id, to_value);
-                            new_names[id] = Some(instr_id);
-                            new_instructions[instr_id].data = InstructionData::Copy(to_value);
-
-                        } // TODO: make it so that every use of variable will d this
-                        InstructionData::Upvalue(function, id) => {
-                            let new_name = new_names[id].unwrap();
-                            new_names[id] = Some(instr_id);
-                            // new_instructions[instr_id]
-                            // new_instructions[instr_id].data = InstructionData::Upindex(, ())
-
-                        }
-                        InstructionData::SetUpvalue(func, id, to_value) => {
-                            new_names[id] = Some(instr_id);
-                        }
-                        InstructionData::Closure(_, id) => {
-                            new_names[id] = Some(instr_id);
-                        }
-                        InstructionData::Param(id) => {
-                            new_names[id] = Some(instr_id);
-                        }
-                        // i think this might be enough? but idk
-                        _ => {}
-
-                    }
-                });
-
-                module.get_successors(
-                    instructions,
-                    &blocks[block_id],
-                    // block_id,
-                    |sucessor, _| {
-                    for (variable_id, map, map_id) in &mut phis[sucessor] {
-                        // TODO: dont know if this should be how it works?
-                        if let Some(var_id)  = new_names[*variable_id] {
-                            let entry = map
-                                .iter_mut()
-                                .find(|(from_block, _)| *from_block == block_id)
-                                .unwrap();
-                            println!("TRYING OT CHANGE THIS BLOCK {:?} TO {:?} with id: {:?} from: {:?}", entry, new_names[*variable_id], variable_id, new_names);
-                            entry.1 = Some(var_id);
-                        }
-                    }
-                });
-
-                for dominated in &dominance_tree[block_id] {
-                    if *dominated == block_id {
-                        println!("its the same!!!!!!!!!!!!!!!!!!!!");
-                        break;
-                    }
-                    println!("block is being dominated by: {:?}", dominated);
-                    visit(*dominated, blocks, instructions, new_names.clone(), phis, dominance_tree, module);
-                }
-            }
-
-            let mut new_names = index_vec!(None; variable_len);
-            visit(0,blocks, instructions,  new_names, &mut phis, dominance_tree, self);
-        }
-        println!("IN THE SSA THINGY");
-        for block in &mut *blocks {
-            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
-            self.for_block(block, instructions, |instruction| {
-                println!(
-                    "      tjhe block {:?} instruction is {:?}",
-                    instruction.id, instruction.data
-                );
             });
         }
-
-        // make phis have proper values
-        {
-            for (block_index, phis) in phis.iter().enumerate() {
-                // let block = self.blocks[block_index];
-                let mut at = None;
-
-                'outer: for (block_id, map, instruction_id) in phis {
-                    println!("MAP IS {:?}", map);
-                    let mut new_map = Vec::with_capacity(map.len());
-                    for (from_block, instruction) in map {
-                        if let Some(instr) = instruction {
-                            new_map.push((*from_block, *instr));
-                        } else {
-                            continue 'outer;
-                        }
+        while let Some((_, frontier, _, replacement_id)) = temporary_phi.pop() {
+            if let Some((frontier_block, frontier_function)) = frontier {
+                let frame = &mut self.functions[frontier_function].frame;
+                // THE THING IS THE START!!!
+                // BUG: also check if the block id matches not just instruction id
+                if let Some(start) = frame.blocks[frontier_block].start {
+                    if replacement_id.1 != start {
+                        Self::insert_instruction(frame, frontier_block, replacement_id.1, None, frame.blocks[frontier_block].start);
+                    } else {
+                        panic!("oh wow 2");
                     }
+                } else {
+                    // panic!("not ineserting");
+                }
+            } else {
+                let frame = &mut self.functions[replacement_id.0].frame;
+                if let Some(start) = frame.blocks[frame.blocks.len() - 1].start {
+                    if replacement_id.1 != start {
+                        // Self::insert_instruction(frame, frontier_block, replacement_id.1, None, frame.blocks[frontier_block].start);
+                        Self::insert_instruction(frame, frame.blocks.len() - 1, replacement_id.1, None, frame.blocks[frame.blocks.len() - 1].start);
+                    } else {
+                        // panic!("oh wow");
+                    }
+                } else {
+                    // panic!("not ineserting 2");
+                }
+                // Self::insert_instruction(frame, frame.blocks.len() - 1, replacement_id.1, None, frame.blocks[frame.blocks.len() - 1].start);
+            }
+        }
 
-                    println!(
-                        "GOT BLOCK ID {:?} AT IS {:?} INSTRUCTION ID {:?}",
-                        block_id, at, instruction_id
-                    );
-                    instructions[*instruction_id].data =
-                        InstructionData::Phi(phi_instructions.len());
-                    self.insert_instruction(instructions, blocks, block_index, at, *instruction_id);
-                    // self.phi_instructions.len()
-                    phi_instructions.push(new_map);
-
-                    at = Some(*instruction_id);
+        // make it so that this here will insert a phi function arguments maybe?
+        self.replace_all_args(|instruction, function, instructions, original_instruction| {
+            for (removed_function, removed, new_destination) in &removed_instructions {
+                if removed_function == function && instruction == removed{
+                    println!("removed: {:?}, new_destination {:?}", removed, new_destination);
+                    *instruction = new_destination.unwrap();
+                    break;
                 }
             }
-        }
-    }
 
-    pub fn copy_propogation(
-        &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        dominance_tree: &IndexVec<usize, Vec<usize>>,
-        phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>
-
-    ) {
-        fn visit(
-            instructions: &mut IndexVec<usize, Instruction>,
-            blocks: &mut Vec<Block>,
-            phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
-            block_id: usize,
-            module: &mut Module,
-            dominance_tree: &IndexVec<usize, Vec<usize>>,
-        ) {
-            module.block_replace_args(
-                &blocks[block_id],
-                instructions,
-                phi_instructions,
-                |instruction_id, new_instructions| {
-                    println!("heres the instruction: {:?} with the id of {:?}", new_instructions[*instruction_id].data, instruction_id);
-                    if let InstructionData::Copy(source) = new_instructions[*instruction_id].data
-                    {
-                        println!(
-                            "i see source {:?} for instruction id {:?}",
-                            source, instruction_id
-                        );
-                        let mut new_arguments = source;
-                        while let InstructionData::Copy(source) = new_instructions[new_arguments].data {
-                            // panic!("wow");
-                            println!("trying to find source {:?} for {:?}", source, new_instructions[*instruction_id].data);
-                            if new_arguments == source {
-                                panic!("they are the same");
+            // let current_instruction = &self.functions[*function].frame.instructions[*instruction];
+            for (_, frontier, map, replacement_id) in temporary_phi.iter() {
+                if let Some((frontier_block, frontier_function)) = frontier {
+                    if frontier_function == function && instructions[original_instruction].block.unwrap() >= *frontier_block {
+                        for (_, phi_instruction) in &phi_map[*map] {
+                            if phi_instruction == instruction {
+                                *instruction = replacement_id.1;
+                                return;
                             }
-                            new_arguments = source;
                         }
-                        println!("      new instruction id {:?} for thing {:?}", new_arguments, instruction_id);
-
-                        // instructions[*instruction_id]
-                        *instruction_id = new_arguments;
-                        println!("instruction id is now {:?}", instruction_id);
                     }
-                });
-
-            for dominated in dominance_tree[block_id].iter() {
-                visit(instructions, blocks, phi_instructions, *dominated, module, dominance_tree);
+                } else {
+                    panic!("forgot")
+                    // insert it at the end?
+                }
             }
-            // module.for_block_mut(block_id, |instruction| {});
-        }
-
-        visit(instructions, blocks, phi_instructions, 0, self, dominance_tree);
-
-        println!("ok within this thing lets see ||||||| pppppppppppppppppppppppppppppppppppppppppp");
-
-        for block in blocks {
-            println!("im in block: {:?}, it has len: {:?}", block.id, block.size);
-            self.for_block(
-                block,
-                instructions,
-                // block.id,
-                |instruction| {
-                    println!(
-                        "      tjhe block {:?} instruction is {:?}",
-                        instruction.id, instruction.data
-                    );
-                    // index += 1;
-                });
-            // println!("          succesors length {:?}", block.successors);
-            // for predl in &block.predecessors {
-            //     println!("      BLOCK {:?} HAS PREDECESSOR {:?}", block.id, predl);
-            // }
-            // for predl in &block.successors {
-            //     println!("      BLOCK {:?} HAS SUCESSOR {:?}", block.id, predl);
-            // }
-        }
-
-        for phi in phi_instructions {
-            println!("theres a phi instruction! {:?}", phi);
-        }
-    }
-
-    pub fn dead_copy_elimination(
-        &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>
-    ) {
-        let mut visited = index_vec![false; instructions.len()];
-        self.all_args(instructions, phi_instructions, blocks, |argument| {
-            println!("visited {:?}", argument);
-            visited[argument] = true;
         });
 
-        for block_id in 0..blocks.len() {
-            let mut current_block = blocks[block_id].start;
-            // let mut at = current_block.start;
-
-            while let Some(instruction_id) = current_block {
-                let instruction = &instructions[instruction_id];
-                let next = instruction.next;
-                println!(
-                    "checking {:?} and {:?} the data {:?}",
-                    instruction_id, visited[instruction_id], instruction.data
-                );
-                if !visited[instruction_id] {
-                    if let InstructionData::Copy(source) = instruction.data {
-                        // let source_value = core::mem::take(&mut source.)
-                        println!("removing copy {:?}", instruction_id);
-                        self.remove_instruction(instructions, blocks, instruction_id);
-                    }
-                }
-
-                current_block = next;
-            }
-        }
+        phi_map
     }
 
-    // convert to conventional ssa form
-    pub fn convert_to_cssa(
-        &mut self,
-        blocks: &mut Vec<Block>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        phi_instructions: &mut IndexVec<usize, Vec<(usize, usize)>>,
-        predecessors: &IndexVec<usize,
-        IndexVec<usize, usize>>
-    ) {
-        let mut predecessor_copy_ids = index_vec![None; blocks.len()];
 
-        // for block_id in 0..self.bl {
-        //
-        // }
-        let mut last_parrallel_id = 1;
-        for block in blocks.iter() {
-
-            let start_instruction = &instructions[block.start.unwrap()];
-            if let InstructionData::Phi(_) = start_instruction.data  {
-            // if let InstructionData::Phi(first_phi) = instructions[block.start.unwrap()].data {
-                let phi_parralel_copy = last_parrallel_id;
-                println!("----------------------------> PARRALEL COPY {:?}", phi_parralel_copy);
-                last_parrallel_id += 1;
-
-
-                {
-                    fn visit(predecessor_copy_ids: &mut IndexVec<usize, Option<usize>>, block_id: usize, mut last_parrallel_id: usize, predecessors: &IndexVec<usize, IndexVec<usize, usize>>) {
-
-                        for predecessor in &predecessors[block_id] {
-                            println!("adding {:?} predecessor to parralel ids as {:?} within the block {:?}", predecessor, last_parrallel_id, block_id);
-                            // issue here is that within the loop, it does not get ALL of the
-                            // predecessors
-                            // it only gets the immediate predecessors of a given block
-                            // which does not work
-                            // we need to get all of the predecessors, including for example block 0
-                            predecessor_copy_ids[*predecessor] = Some(last_parrallel_id);
-                            last_parrallel_id += 1;
-
-                            // visit(predecessor_copy_ids, *predecessor, last_parrallel_id, predecessors);
-                        }
-                    }
-
-                    visit(&mut predecessor_copy_ids, block.id, last_parrallel_id, predecessors);
-                }
-
-                println!("----------------------------< AFTER  PARRALEL COPY {:?}", phi_parralel_copy);
-                // for predecessor in &predecessors[block.id] {
-                //     println!("adding {:?} predecessor to parralel ids as {:?} within the block {:?}", predecessor, last_parrallel_id, block.id);
-                //     // issue here is that within the loop, it does not get ALL of the
-                //     // predecessors
-                //     // it only gets the immediate predecessors of a given block
-                //     // which does not work
-                //     // we need to get all of the predecessors, including for example block 0
-                //     predecessor_copy_ids[*predecessor] = Some(last_parrallel_id);
-                //     last_parrallel_id += 1;
-                //
-                // }
-
-                // for predecessor in &predecessors[block.id] {
-                //     println!("adding {:?} predecessor to parralel ids as {:?} within the block {:?}", predecessor, last_parrallel_id, block.id);
-                //         // issue here is that within the loop, it does not get ALL of the
-                //     // predecessors
-                //     // it only gets the immediate predecessors of a given block
-                //     // which does not work
-                //     // we need to get all of the predecessors, including for example block 0
-                //     predecessor_copy_ids[*predecessor] = Some(last_parrallel_id);
-                //     last_parrallel_id += 1;
-                // }
-
-                let mut old_phi_cursor = Some(start_instruction.id);
-                let mut new_phi_cursor = None;
-                while let Some(at) = old_phi_cursor {
-                    let InstructionData::Phi(map) = instructions[at].data else { break; };
-                    // let map = &mut self.phi_instructions[at];
-
-                    // parallel copies for each phi arguments in predecessors
-                    // TODO: try not to clone
-
-                    // FIXME: i dont think phi_instructions[at] would work.
-                    // At is an instruction not a phi map so in order to get the proper map i need
-                    // to get it from the phi instruction value using a let-else itself
-                    for (predecessor, source) in &mut phi_instructions[map] {
-                        println!("tryign to find predecessor {:?} within {:?}", predecessor, predecessor_copy_ids);
-                        let copy_id = predecessor_copy_ids[*predecessor].unwrap();
-                        let copy = instructions.len();
-
-
-                        // insert parralel copy before the end of the block
-                        // let last_block = blocks[*predecessor].clone();
-                        let last_id = blocks[*predecessor].end.unwrap();
-                        let last_instruction = &instructions[last_id];
-
-                        instructions.push(Instruction {
-                            data: InstructionData::ParallelCopy(*source, copy_id),
-                            previous: last_instruction.previous,
-                            next: Some(last_id),
-                            // function: last_instruction.function,
-                            block: Some(*predecessor),
-                            id: copy,
-                        });
-
-                        // FIXME: might not work? check if works
-                        *source = copy;
-
-                    }
-
-                    // copies for phi outputs
-                    // replace phi uses with parralel copies of that phi use
-
-                    let new_phi = instructions.len();
-                    println!("THE DATA {:?}", instructions[map].data.clone());
-
-                    instructions.push(Instruction {
-                        data: instructions[map].data.clone(),
-                        block: Some(block.id),
-                        next: None,
-                        previous: new_phi_cursor,
-                        id: new_phi,
-                        // function: block.function
-                    });
-
-                    // insert
-                    if let Some(new_cursor) = new_phi_cursor {
-                        println!("the old next for the new_phi_cursor was {:?}", new_cursor);
-                        instructions[new_cursor].next = Some(new_phi);
-                    }
-
-
-                    let phi = &mut instructions[map];
-                    phi.data = InstructionData::ParallelCopy(new_phi, phi_parralel_copy);
-                    // phi.data = self.instructions[new_phi].data;
-
-                    old_phi_cursor = phi.next;
-
-                    new_phi_cursor = Some(new_phi);
-
-                }
-
-                for copy_id in &mut predecessor_copy_ids {
-                    *copy_id = None;
-                }
-                // let mut new_phi_cursor
-            }
-        }
-    }
-
-    pub fn block_gen_kill(
+    pub fn get_liveness(
         &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>
-
-
-    ) -> (IndexVec<usize, IndexVec<usize, bool>>, IndexVec<usize, IndexVec<usize, bool>>){
-        let mut gens = IndexVec::with_capacity(blocks.len());
-        let mut kills = IndexVec::with_capacity(blocks.len());
-
-        for block in &mut *blocks {
-            let mut generate = index_vec![false; instructions.len()]; // perhaps this is too long?
-            let mut kill = index_vec![false; instructions.len()];
-
-            self.for_block_reverse(
-                instructions,
-                block,
-                // block.id,
-                |instruction| {
-                    if instruction.has_value() {
-                        kill[instruction.id] = true;
-                        generate[instruction.id] = false;
-                    }
-
-                    if let InstructionData::Phi(_) = instruction.data{
-                    } else {
-                        self.instruction_args(&phi_instructions, &instruction.data, |argument| {
-                            generate[argument] = true;
-                        });
-                    }
-
-                });
-
-            gens.push(generate);
-            kills.push(kill);
-        }
-
-        (gens, kills)
-    }
-
-    // TODO: name the types way better than just this
-    // this outputs `live_ins` and `live_outs`
-    pub fn block_live_in_out(
-        &self,
-        blocks: &mut Vec<Block>,
-        instructions: &mut IndexVec<usize, Instruction>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>
-    ) -> (IndexVec<usize, IndexVec<usize, bool>>, IndexVec<usize, IndexVec<usize, bool>>){
-        let (gens, kills) = self.block_gen_kill(instructions, blocks, phi_instructions);
-
-        let mut live_ins = index_vec![index_vec![false; instructions.len()]; blocks.len()];
-        let mut live_outs = index_vec![index_vec![false; instructions.len()]; blocks.len()];
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-
-            for block in blocks.iter() {
-                let generate = &gens[block.id];
-                let kill = &kills[block.id];
-
-                let mut new_live_out = index_vec![false; instructions.len()];
-
-                self.get_successors(instructions, block, |successor, instructions| {
-                    for (i, live) in live_ins[successor].iter().enumerate() {
-                        if *live {
-                            new_live_out[i] = true;
-                        }
-                    }
-
-                    self.for_block_terminator(instructions, blocks, successor, |instruction| {
-                        if let InstructionData::Phi(map_id) = instruction.data {
-                            // let map = self.phi_instructions[map_id];
-                            let source = phi_instructions[map_id].get(block.id).unwrap();
-                            new_live_out[source.1] = true;
-
-                            return true;
-                        }
-
-                        false
-                    });
-
-
-                });
-
-                let mut new_live_in = new_live_out.clone();
-                for (i, kill) in kill.iter().enumerate() {
-                    if *kill {
-                        new_live_in[i] = false;
-                    }
-                }
-
-                for (i, generated) in generate.iter().enumerate() {
-                    if *generated {
-                        new_live_in[i] = true;
-                    }
-                }
-
-                if new_live_in != live_ins[block.id] {
-                    changed = true;
-                    live_ins[block.id] = new_live_in;
-                }
-                if new_live_out != live_outs[block.id] {
-                    changed = true;
-                    live_outs[block.id] = new_live_out;
-                }
-            }
-        }
-
-        (live_ins, live_outs)
-    }
-
-    pub fn instruction_post_order(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &Vec<Block>,
-        post_order: &Vec<usize>
-    )  -> Vec<usize> {
-        let mut output = Vec::with_capacity(instructions.len());
-        for block in post_order {
-            self.for_block(&blocks[*block], instructions, |insturction| {
-                output.push(insturction.id);
-            });
-
-        }
-
-        output
-    }
-    // pub fn function_post_order(&self, function_id: usize, function_order: &Vec<usize>)  -> Vec<usize> {
-    //     let function = &self.functions[function_id];
-    //     let mut output = Vec::with_capacity(function.instructions_end - function.instructions_start);
-    //     for block in function_order {
-    //         self.for_block(*block, |insturction| {
-    //             output.push(insturction.id);
-    //         });
-    //
-    //     }
-    //
-    //     output
-    // }
-
-    // pub fn function_intervals(
-    //     &self,
-    //     instructions: &mut IndexVec<usize, Instruction>,
-    //     phi_instructions: IndexVec<usize, Vec<(usize, usize)>>,
-    //     function_id: usize,
-    //     function_order: &Vec<usize>,
-    //     function_indices: &IndexVec<usize, usize>,
-    //     live: &mut IndexVec<usize, Option<usize>>
-    // )  {
-    //     for (order_id, instruction_id) in function_order.iter().enumerate().rev() {
-    //         let mut instruction = &instructions[*instruction_id];
-    //
-    //         if instruction.has_value() {
-    //             if let InstructionData::Closure(new_function) = instruction.data {
-    //
-    //             } else if let InstructionData::Phi(map_id) = instruction.data {
-    //                 let mut phi_map = &phi_instructions[map_id];
-    //                 for (_, arg) in phi_map {
-    //                     let indice = function_indices[*arg];
-    //                 }
-    //
-    //             } else {
-    //
-    //             }
-    //         }
-    //     }
-    // }
-
-    pub fn live_intervals(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        blocks: &mut Vec<Block>,
         phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
-        post_order: &Vec<usize>,
-        instruction_indices: &IndexVec<usize, usize>,
-        upindex: IndexVec<usize, Vec<usize>>
-
+        post_order: &Vec<(usize, usize)>,
+        order_indices: &IndexVec<usize, IndexVec<usize, usize>>
     ) -> IndexVec<usize, Option<usize>>{
+        let mut live: IndexVec<usize, Option<usize>> = index_vec![None; post_order.len()];
+        let mut function_ends: IndexVec<usize, usize> = index_vec![0; self.functions.len()];
+        for (index, (function_id, instruction_id)) in post_order.iter().enumerate().rev() {
+            let function = &self.functions[*function_id];
+            let instruction = &function.frame.instructions[*instruction_id];
 
-        let instruction_order = self.instruction_post_order(instructions, blocks, post_order);
-        let mut live = index_vec![None; instruction_order.len()];
+            if function_ends[*function_id] == 0 {
+                function_ends[*function_id] = index;
+            }
 
-
-        let mut live_upindex = Vec::new();
-        for (order_id, instruction_id) in instruction_order.iter().enumerate().rev() {
-            let instruction = &instructions[*instruction_id];
-
-            println!("checking if {:?} has value", instruction.data);
             if instruction.has_value() {
-                println!("          it does!");
                 match &instruction.data {
                     InstructionData::Phi(map_id) => {
                         let phi_map = &phi_instructions[*map_id];
-                        for (block, arg) in phi_map {
-                            let indice = instruction_indices[*arg];
-                            live[indice] = live[order_id];
+                        for (new_function, arg) in phi_map {
+                            let indice = order_indices[*new_function][*arg];
+                            live[indice] = live[index];
                         }
                     }
-                    InstructionData::Closure(function_id, var_id) => {
-                        for upindex in &upindex[*function_id] {
-                            live_upindex.push((function_id, *upindex));
-                        }
-                    }
-                    InstructionData::CallFunction(function_id, var_id) => {
-                        for (function, upindex) in &live_upindex {
-                            if *function == function_id {
-                                self.instruction_args(phi_instructions, &instructions[*upindex].data, |arg| {
-                                    let indice = instruction_indices[arg];
-                                    if live[indice].is_none() {
-                                        live[indice] = Some(order_id);
-                                    }
-                                });
-
-                            }
-                        }
-
-                        self.instruction_args(phi_instructions, &instruction.data, |arg| {
-                            println!("In {:?}", instruction.data);
-                            let indice = instruction_indices[arg];
-                            if live[indice].is_none() {
-                                live[indice] = Some(order_id);
-                            }
-                        });
+                    InstructionData::Upindex(func_id, ref_id) => {
+                        live[index] = Some(function_ends[*function_id]);
                     }
                     _ => {
-                        self.instruction_args(phi_instructions, &instruction.data, |arg| {
-                            println!("In {:?}", instruction.data);
-                            let indice = instruction_indices[arg];
+
+                        Self::instruction_args(*function_id, &instruction.data, &mut |arg, arg_function| {
+                            let indice = order_indices[*arg_function][*arg];
                             if live[indice].is_none() {
-                                live[indice] = Some(order_id);
+                                live[indice] = Some(index);
                             }
                         });
                     }
                 }
             }
-            // a liveness of none couudl mean 2 things
-            // phi functions: maybe?
-            // or a variable that isnt used
         }
-
         for (index, value) in live.iter().enumerate() {
-            println!("!! Liveness index: {:?} -> with end {:?}", index, value);
-            // if let Some(data) = index {
-                let instruction_id = instruction_order[index];
-                let instruction = &instructions[instruction_id];
-                println!("          with data {:?}", instruction.data);
-            // }
+            println!("L: hey i have liveness {:?} : {:?}", index, value);
         }
 
         live
     }
 
-    // loop over phi maps instructions
-    // so that i can make it so that if allocate register phi function points to another phi
-    // function
-    // then it jsut also loops over the other phi functions instructions as well
-    // recursively
-    pub fn for_phi<F: FnMut(usize)>(
-        &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
-        map_id: &usize,
-        callback: &mut F
-    ) {
-        for (block, phi_arg) in &phi_instructions[*map_id] {
-            println!("ok in for phi now, map id {:?}", map_id);
-            if let InstructionData::Phi(new_map) = instructions[*phi_arg].data {
-                println!("has phi thingies {:?}", new_map);
-                if new_map == *map_id {
-                    panic!("same??");
-                }
-                // println!("|| met a phi! {:?} with map {:?}", phi_arg, map_id);
-                self.for_phi(instructions, phi_instructions, &new_map, callback);
-                callback(*phi_arg,);
-            } else {
-                println!("no phi hingieis");
-                callback(*phi_arg)
-            }
-        }
-    }
-    // tewlls which instruction ids/variables require what register
     pub fn allocate_registers(
         &self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        // blocks: &mut Vec<Block>,
-        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
+        phi_map: &IndexVec<usize, Vec<(usize, usize)>>,
+        post_order: &Vec<(usize, usize)>,
+        order_indices: &IndexVec<usize, IndexVec<usize, usize>>,
         liveness: IndexVec<usize, Option<usize>>,
-        instruction_order: &Vec<usize>,
-        instruction_indices: &IndexVec<usize, usize>,
-        all_registers: &mut Vec<usize>,
-        offset: usize,
-    ) -> (IndexVec<usize, Option<usize>>, usize) {
+    ) -> IndexVec<usize, Option<usize>> {
+        // register, function
+        let mut post_order_registers: IndexVec<usize, Option<usize>> = index_vec![None; post_order.len()];
+        let mut all_registers: IndexVec<usize, IndexVec<usize, usize>> = index_vec![IndexVec::new(); self.functions.len()];
 
-        // this needs to know when a register ends so its safe to make a new one
-        // and when  to use old one
-
-        let mut instruction_registers = index_vec![None; instruction_order.len()];
-        println!("size of instruction order: {:?}", instruction_order.len());
-        // all_registers.resize(all_registers.len() + instruction_order.len(), 0);
-        let mut all_registers: IndexVec<usize, usize> = index_vec![0; instruction_order.len()];
-        let mut phi_registers: Vec<(usize, usize)> = vec![];
-        println!("THE LIVENESS FOR EVERYTHING {:?} LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", liveness);
-        let mut highest_register = 0;
-        // let mut instruction_indices = Vec::with_capacity(instruction_order.len());
+        let mut previous_function = 0;
         for (order_index, liveness_end) in liveness.iter().enumerate() {
-            let instruction = &instructions[instruction_order[order_index]];
-            println!("post borrow within index {:?}", order_index);
+            let (order_function, order_id) = post_order[order_index];
+            let frame = &self.functions[order_function].frame;
+            let instruction = &frame.instructions[order_id];
 
-            if liveness_end.is_none() {
-                println!("its none! {:?}", order_index);
-                continue;
-            }
-            if let InstructionData::Phi(map_id) = instruction.data {
-                println!("in phi");
-                let mut first_instruction = None;
-                let mut first_register = None;
-                // println!("first instruction is {:?} and is -> {:?} || which ahs register {:?}", instruction_indices[*first_instruction], first_instruction, first_register);
-                self.for_phi(instructions, phi_instructions, &map_id, &mut |arg| {
-                    println!("in for phi");
-                    println!("hello {:?}, first instruction: {:?}", arg, first_instruction);
-                    if first_instruction.is_none() {
-                        let phi_arg_order = instruction_indices[arg];
-                        first_instruction = Some(arg);
-                        // first_register = Some(std::mem::swap(&mut first_register, instruction_registers[phi_arg_order].unwrap()));
-                        // std::mem::swap(&mut first_register, &mut  instruction_registers[phi_arg_order]);
-                        first_register =
-                            instruction_registers[phi_arg_order];
-                        // instruction_registers[phi_arg_order] = first_register;
-                    } else {
-                        let phi_arg_order = instruction_indices[arg];
-                        instruction_registers[phi_arg_order] = first_register;
-                        println!("setting {:?} to {:?}", phi_arg_order, first_register);
+
+            match instruction.data {
+                InstructionData::SetUpindex(to_value, upindex) => {
+                    post_order_registers[order_indices[order_function][to_value]] = post_order_registers[order_indices[order_function][upindex]];
+                    println!("register upindex set to {:?}", post_order);
+                    continue;
+                }
+                InstructionData::Phi(map_id) => {
+                    let mut first_instruction = None;
+                    let mut first_register = None;
+                    self.for_phi(phi_map, &map_id, &mut |arg, function_id| {
+                        if first_instruction.is_none() {
+                            println!("function id is {:?}", function_id);
+                            first_instruction = Some((arg, function_id));
+
+                            first_register = post_order_registers[order_indices[function_id][arg]];
+                        } else {
+                            post_order_registers[order_indices[function_id][arg]] = first_register;
+                        }
+                    });
+                    if let Some((first_instruction, first_function)) = first_instruction {
+                        println!("all registers is {:?} and first function {:?} | first instr {:?}", all_registers, first_function, first_instruction);
+                        let order_register = order_indices[first_function][first_instruction];
+                        // if let Some(register) = all_registers[first_function].get_mut(order_register) {
+                        //     *register = liveness_end.unwrap();
+                        // } else {
+                        //     // all_registers[first_function].resize(order_register + 1, 0);
+                        //     // all_registers[first_function][order_register] = liveness_end.unwrap();
+                        // }
+                        // all_registers[first_function][order_register] = liveness_end.unwrap();
                     }
-                });
-                println!("after for phi?");
-                all_registers[instruction_indices[first_instruction.unwrap()]] = liveness_end.unwrap();
-                println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! PHI {:?} MET LIVENESS END {:?}", map_id,liveness_end);
-                instruction_registers[order_index] = first_register;
-                continue;
-
-            }
-            // NOTE: make it s othat comapre equals will ahve a lifetime so that it can do stuff
-            // wit hthe registers!!
-
-            // for (index, register_end) in all_registers.iter_mut().enumerate() {
-            //     if *register_end < order_index {
-            //         instruction_registers
-            //     }
-            // }
-            for (index, register_end) in all_registers.iter_mut().enumerate().skip(offset) {
-                println!("{:?} < {:?}", register_end, order_index);
-                println!("      INDEX {:?}", index);
-                // if let  =  {
-                //
-                // }
-                if *register_end < order_index || order_index == 0 {
-                    *register_end = liveness_end.unwrap();
-                    println!("      index is {:?} and end now is {:?} || order: {:?}", index, register_end, order_index);
-                    instruction_registers[order_index] = Some(index);
-                    if index > highest_register {
-                        highest_register = index;
-                    }
-                    println!("      instruction registers now {:?}", instruction_registers);
-                    break;
+                    post_order_registers[order_index] = first_register;
+                    continue
 
                 }
+                _ => {}
             }
-            // println!("              register end aftrer {:?}", all_registers[instruction_registers[order_index].unwrap_or(0)])
-        }
+            if post_order_registers[order_index].is_some() {
+                panic!("YES");
+            }
+            if liveness_end.is_none() {
+                // panic!("ok");
+                println!("skipping {:?}", instruction.data);
+                continue;
+            }
 
-        for (index, value) in instruction_registers.iter().enumerate() {
-                let instruction_id = instruction_order[index];
-                let instruction = &instructions[instruction_id];
-            println!("Ordered index: {:?} -> with value {:?} || {:?} || {:?} || ", index, value, instruction.data, instruction.id);
-            // if let Some(data) = index {
-                // println!("          with data {:?}", instruction.data);
-            // }
+            println!("instruction is {:?}", instruction.data);
+            // for function in all_registers.iter_mut() {
+            // NOTE: i might have to make is ot htat it would also add a register end to all outer
+            // functions too
+            // panic!("what");
+            let mut new_index = None;
+            for (index, register_end) in all_registers[order_function].iter_mut().enumerate() {
+                println!("ok so comparing {:?} < {:?}", register_end, order_index);
+                if *register_end < order_index  {
+                    *register_end = liveness_end.unwrap();
+                    new_index = Some(index);
+                    println!("---- index should be {:?}", index);
+                    break;
+                }
+            }
+            if let Some(new_index) = new_index {
+                println!("psot order registers is {:?}", post_order_registers);
+                post_order_registers[order_index] = Some(new_index);
+            } else {
+                let length = all_registers[order_function].len();
+                all_registers[order_function].resize(length + 1, 0);
+                all_registers[order_function][length] = liveness_end.unwrap();
+                println!("!! length is {:?} and im setting ordeer index {:?}", length, order_index);
+                post_order_registers[order_index] = Some(length);
+            }
         }
+        println!("aftert all regidster {:?}", all_registers);
 
-        (instruction_registers, highest_register)
+        post_order_registers
     }
-
     pub fn compile_bytecode(
         &self,
-        instructions: &IndexVec<usize, Instruction>,
-        blocks: &Vec<Block>,
-        instruction_indices: &IndexVec<usize, usize>,
-        instruction_order: Vec<usize>,
-        post_order: &Vec<usize>,
-        variable_registers: &IndexVec<usize, Option<usize>>
-    ) -> Vec<u8>{
-        // IMPORTANT: looping over instructions in post order by blocks make it so that copies are
-        // gone
-        // to fix make copies proprely implemented in their respective blocks, as currently they
-        // are somehow ignored?
+        post_order: &Vec<(usize, usize)>,
+        order_indices: &IndexVec<usize, IndexVec<usize, usize>>,
+        // INFO: so as a solution to the prob lem of hwo to make it so that the virtual machine
+        // would understand which register is relative and which is non relative
+        //
+        //make order_registers instead of an option usize it would be a custom enum type that can
+        //be casted to a u8 type
+        //which then to detect ifi ts relative
+        //relative - if function id matches
+        // absolute - if function id doesnt match
+        order_registers: &IndexVec<usize, Option<usize>>
+    ) -> IndexVec<usize, Vec<u8>> {
+        let mut all_output = index_vec![Vec::new(); self.functions.len()];
 
-        // let variable_registers = IndexVec::new();
-        let mut output: Vec<u8> = vec![];
-        // let mut functions = Vec::new();
-
-        // let instruction_order: Vec<usize> = self.instruction_post_order(post_order);
-        println!("--- the bytercode");
-        for (index, instruction_id) in instruction_order.iter().enumerate() {
-            println!("          got instruction {:?} which is {:?}, and block {:?}", index, instructions[*instruction_id].data, instructions[*instruction_id].block.unwrap());
-        }
-        println!("--- the instructions of everything");
-        for (index, instruction_id) in instructions.iter().enumerate() {
-            println!("          got instruction {:?} which is {:?} deleted -> {:?}", index, instruction_id.data, instruction_id.block);
-        }
-        // for function in &self.functions {
-        //     println!("ok so function start: {:?} and end {:?}", function.instructions_start, function.instructions_end);
-        // }
-        println!("--- the other tgh ing");
-        // let mut decoded_instructions = index_vec![None; instructions.len()];
+        let mut replace_to_pc = Vec::new();
         let mut inserted_ids = 0;
-        let mut replace_instructions = Vec::new();
-        for (order_id, instruction_id) in instruction_order.iter().enumerate() {
-            let instruction = &instructions[*instruction_id];
-            println!("instruction data is {:?}", instruction.data);
-            println!("Instruction id is {:?}", instruction_id);
+        for (index, (order_function, order_id)) in post_order.iter().enumerate() {
+            let frame = &self.functions[*order_function].frame;
+            let instruction = &frame.instructions[*order_id];
+            let output = &mut all_output[*order_function];
 
+            for (instr_id, function_id, location) in &replace_to_pc {
+                if instr_id == order_id && *function_id == order_function {
+                    println!("instr data: {:?} replacing with {:?}", instruction.data, output.len());
+                    output[*location] = output.len() as u8;
+                    if output[*location - 1] == Opcode::Jump as u8 {
+                        output.pop();
+                        output.pop();
+                        // panic!("it leads to a jump that would go to {:?} || order id {:?}", instruction.id, index);
+                    }
+                }
+            }
             match &instruction.data {
                 InstructionData::LoadNumber(num) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        println!("decoded {:?}", instruction_id);
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding load", order_id);
+                    if let Some(register_id) = order_registers[index] {
                         output.push(Opcode::Load as u8);
                         output.push(*num as u8);
-                        println!("var registers: {:?} || order id {:?}", variable_registers, order_id);
-                        println!("{:?}\n{:?}", num, register_id);
                         output.push(register_id as u8);
-                        println!("---")
                     }
                 }
-                InstructionData::Add(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        println!("decoded {:?}", instruction_id);
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding add opcode", order_id);
-                        println!("{:?}\n{:?}\n{:?}", register_1, register_2, variable_registers[order_id]);
-                        println!("---");
-                        output.push(Opcode::Add as u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        // output.push(*register_2 as u8);
+                InstructionData::MathOperands(variant, num_1, num_2) => {
+                    if let Some(register_id) = order_registers[index] {
+                        match variant {
+                            MathVariant::Add => output.push(Opcode::Add as u8),
+                            MathVariant::Subtract => output.push(Opcode::Subtract as u8),
+                            MathVariant::Multiply => output.push(Opcode::Multiply as u8),
+                            MathVariant::Divide => output.push(Opcode::Divide as u8),
+                            MathVariant::Remainder => output.push(Opcode::Remainder as u8),
+                        }
+                        output.push(order_registers[order_indices[*order_function][*num_1]].unwrap() as u8);
+                        output.push(order_registers[order_indices[*order_function][*num_2]].unwrap() as u8);
                         output.push(register_id as u8);
                     }
-                    // output.push(variable_registers[order_id].unwrap() as u8);
-                    // output.push(variable_registers[instruction_id]);
                 }
-                InstructionData::Subtract(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        println!("decoded {:?}", instruction_id);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding subtract opcode", order_id);
-                        println!("{:?}\n{:?}\n{:?}", register_1, register_2, variable_registers[order_id]);
-                        println!("---");
-                        output.push(Opcode::Subtract as u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        // output.push(*register_1 as u8);
-                        // output.push(*register_2 as u8);
+                InstructionData::ComparisonOperands(variant, num_1, num_2) => {
+                    if let Some(register_id) = order_registers[index] {
+                        match variant {
+                            ComparisonVariant::Equal => output.push(Opcode::Equal as u8),
+                            ComparisonVariant::NotEqual => output.push(Opcode::NotEqual as u8),
+                            ComparisonVariant::LessEqual => output.push(Opcode::LessThanOrEqual as u8),
+                            ComparisonVariant::MoreEqual => output.push(Opcode::GreaterThanOrEqual as u8),
+                            ComparisonVariant::LessThan => output.push(Opcode::LessThan as  u8),
+                            ComparisonVariant::MoreThan => output.push(Opcode::GreaterThan  as u8),
+                        }
+                        output.push(order_registers[order_indices[*order_function][*num_1]].unwrap() as u8);
+                        output.push(order_registers[order_indices[*order_function][*num_2]].unwrap() as u8);
                         output.push(register_id as u8);
                     }
-                    // println!("adding opcode Subtract {:?}", Opcode::Subtract as u8);
-                    // output.push(variable_registers[order_id].unwrap() as u8);
-                    // output.push(variable_registers[instruction_id]);
-                }
-                InstructionData::Multiply(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        // println!("decoded {:?}", instruction_id);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding multiply opcode", order_id);
-                        println!("{:?}\n{:?}\n{:?}", register_1, register_2, variable_registers[order_id]);
-                        println!("---");
-                        output.push(Opcode::Multiply as u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        // output.push(*register_1 as u8);
-                        // output.push(*register_2 as u8);
-                        output.push(register_id as u8);
-                    }
-                    // println!("adding opcode Multiply {:?}", Opcode::Multiply as u8);
-                    // output.push(variable_registers[order_id].unwrap() as u8);
-                    // output.push(variable_registers[instruction_id]);
-                }
-                InstructionData::Divide(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        println!("decoded {:?}", instruction_id);
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding divide opcode", order_id);
-                        println!("{:?}\n{:?}\n{:?}", register_1, register_2, variable_registers[order_id]);
-                        println!("---");
-                        output.push(Opcode::Divide as  u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        // output.push(*register_1 as u8);
-                        // output.push(*register_2 as u8);
-                        output.push(register_id as u8);
-                    }
-                    println!("adding opcode divide {:?}", Opcode::Divide as u8);
-                    // output.push(variable_registers[instruction_id]);
-                }
-                InstructionData::Remainder(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        println!("decoded {:?}", instruction_id);
-                        // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                        inserted_ids = output.len();
-                        println!(" {:?} Adding remainder opcode", order_id);
-                        println!("{:?}\n{:?}\n{:?}", register_1, register_2, variable_registers[order_id]);
-                        println!("---");
-                        output.push(Opcode::Remainder as  u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        // output.push(*register_1 as u8);
-                        // output.push(*register_2 as u8);
-                        output.push(register_id as u8);
-                    }
-                    println!("adding opcode remainder {:?}", Opcode::Remainder as u8);
-                    // output.push(variable_registers[instruction_id]);
-                }
-                InstructionData::CompareEqual(register_1, register_2) => {
-                    if let Some(register_id) = variable_registers[order_id] {
-                        inserted_ids = output.len();
-                        output.push(Opcode::Equal as u8);
-                        output.push(variable_registers[instruction_indices[*register_1]].unwrap() as u8);
-                        output.push(variable_registers[instruction_indices[*register_2]].unwrap() as u8);
-                        output.push(register_id as u8);
-                    }
-
                 }
                 InstructionData::Jump(block) => {
-                    // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                    // println!("decoded {:?}", instruction_id);
-                    inserted_ids = output.len();
-                    println!(" {:?} Adding jump opcode", order_id);
-                    // println!("{:?} which should be {:?}", decoded_instructions[instruction_indices[self.blocks[*block].start.unwrap()]],self.blocks[*block].start);
-                    println!("---");
-                    // println!("adding opcode jump {:?}", Opcode::Jump as u8);
-                    output.push(Opcode::Jump as u8);
-                    // println!("Jump is {:?}", block)
-                    // TODO: dont use this as block jump as this will jump t oan instruction
-                    // NOT bytecode order!!!
-                    // make it so that it setsl ikea  reminder or something that on this specific
-                    // instruction, you need to go back and modify the jumps id to it
-                    // like a jumplist  vec for example
-                    // replace_instructions.push((self.blocks[*block].start.unwrap(), output.len()));
-                    let mut start = blocks[*block].start.unwrap();
-                    loop {
-                        let instruction = &instructions[start];
-                        match instruction.data {
-                            InstructionData::Phi(_) | InstructionData::MakeLocal(_) => {
-                                println!("{:?} in start START WAS A PHI! MOVIONG ON TO {:?}", instruction.id, instruction.next);
-                                // NOTE: fi i were to remove makelocal then all i need to do is
-                                // just get how many phis are ina block and skip p ast those in
-                                // order to get to actual instructions
-                                start = instruction.next.unwrap();
-                            },
-                            _ => break,
+                    // let mut start = bl
+                    if let Some(start) = frame.blocks[*block].start {
+                        let mut start = start;
+                        loop {
+                            let instruction = &frame.instructions[start];
+                            match instruction.data {
+                                InstructionData::Phi(_) => {
+                                    start= instruction.next.unwrap();
+                                },
+                                _ => break,
+                            }
                         }
+                        output.push(Opcode::Jump as u8);
+                        replace_to_pc.push((start, order_function, output.len()));
+                        output.push(98);
+                        println!("|||||||||||||||| ADDED A JUMP INSTRUCTION {:?} IN FUCNTION {:?}, order id {:?}", instruction.id, order_function, index);
                     }
-                    replace_instructions.push((start, output.len()));
-                    output.push(98);
-                    // output.push(decoded_instructions[instruction_indices[self.blocks[*block].start.unwrap()]].unwrap() as u8);
-                    // output.push(decoded_instructions[self.blocks[*block].start.unwrap()].unwrap() as u8);
                 }
-                // NOTE: from my observations, only the false part of the jumpconditional is
-                // important, as the truethy part will always be after the jumpconditional in post
-                // order instructions
-
                 InstructionData::JumpConditional(comparison, target_true, target_false) => {
-                    println!("decoded {:?}", instruction_id);
-                    // decoded_instructions[*instruction_id] = Some(inserted_ids);
-                    inserted_ids = output.len();
-                    println!(" {:?} Adding jump conditional opcode", order_id);
-                    // println!("{:?} which should be {:?}", decoded_instructions[instruction_indices[blocks[*target].start.unwrap()]],blocks[*target].start);
-                    println!("---");
-                    // got the comparison as t is the instruction executed before
-                    output.push(Opcode::JumpConditional as u8);
-                    let mut true_start = blocks[*target_true].start.unwrap();
+                    let mut true_start = frame.blocks[*target_true].start.unwrap();
                     loop {
-                        let instruction = &instructions[true_start];
-                        println!("TRUE START IS {:?}", instruction.data);
+                        let instruction = &frame.instructions[true_start];
                         match instruction.data {
-                            InstructionData::Phi(_) | InstructionData::MakeLocal(_) => {
-                                println!("{:?} in true start START WAS A PHI! MOVIONG ON TO {:?}", instruction.id, instruction.next);
-                                // NOTE: fi i were to remove makelocal then all i need to do is
-                                // just get how many phis are ina block and skip p ast those in
-                                // order to get to actual instructions
+                            InstructionData::Phi(_) => {
                                 true_start = instruction.next.unwrap();
                             },
                             _ => break,
                         }
                     }
-                    replace_instructions.push((true_start, output.len()));
-                    println!("''''''''''''''''''''''''''''''' I NEED A JUMP CONDITIONAL FALSE IN {:?}", output.len());
-                    output.push(97);
-                    // output.push(true_start);
-                    let mut false_start = blocks[*target_false].start.unwrap();
-                    loop {
-                        let instruction = &instructions[false_start];
-                        println!("FALSE START IS {:?}", instruction.data);
-                        match instruction.data {
-                            InstructionData::Phi(_) | InstructionData::MakeLocal(_) => {
-                                println!("{:?} in false start START WAS A PHI! MOVIONG ON TO {:?}", instruction.id, instruction.next);
-                                // NOTE: fi i were to remove makelocal then all i need to do is
-                                // just get how many phis are ina block and skip p ast those in
-                                // order to get to actual instructions
-                                false_start = instruction.next.unwrap();
-                            },
-                            _ => break,
+                    if let Some(false_target) = frame.blocks.get(*target_false) {
+                        if let Some(false_start) = frame.blocks[*target_false].start {
+                            let mut false_start = false_start;
+                            loop {
+                                let instruction = &frame.instructions[false_start];
+                                match instruction.data {
+                                    InstructionData::Phi(_) => {
+                                        false_start = instruction.next.unwrap();
+                                    },
+                                    _ => break,
+                                }
+                            }
+
+                            output.push(Opcode::JumpConditional as u8);
+                            replace_to_pc.push((true_start, order_function, output.len()));
+                            replace_to_pc.push((false_start, order_function,  output.len() + 1));
+                            output.push(99);
+                            output.push(98);
+                            continue;
                         }
                     }
-                    replace_instructions.push((false_start, output.len()));
-                    // output.push(self.blocks[*target_true].start.unwrap() as u8);
-                    // replace_instructions.push((self.blocks[*target_false].start.unwrap(), output.len()));
-                    // output.push(false_start as u8);
+                    output.push(Opcode::JumpIfEqual as u8);
+                    replace_to_pc.push((true_start, order_function, output.len()));
                     output.push(99);
-                    // replace_instructions.push((self.blocks, output.len()));
-                    // output.push(self.blocks[*target].start.unwrap() as u8);
-                    // println!("got {:?}", decoded_instructions[self.blocks[*target_true].start.unwrap()]);
-                    // println!("from index {:?}", self.blocks[*target_true].start.unwrap());
-                    // output.push(decoded_instructions[self.blocks[*target_true].start.unwrap()].unwrap() as u8);
-                    // output.push(decoded_instructions[self.blocks[*target_false].start.unwrap()].unwrap() as u8);
-                    // output.push(decoded_instructions[instruction_indices[self.blocks[*target_false].start.unwrap()]].unwrap() as u8);
                 }
-                InstructionData::Print(target_instruction) => {
-                    inserted_ids = output.len();
-
+                InstructionData::Print(target) => {
+                    // if let Some(register) = order_registers[index] {
                     output.push(Opcode::Print as u8);
-                    // output.push(*target_instruction as u8);
-                    // output.push(instruction_indices[*target_instruction] as u8);
-                    output.push(variable_registers[instruction_indices[*target_instruction]].unwrap() as u8);
+                    output.push(order_registers[order_indices[*order_function][*target]].unwrap() as u8);
+                    // }
                 }
                 InstructionData::Closure(function_id, variable_id) => {
-                    if let Some(register) =  variable_registers[order_id] {
-
-                        inserted_ids = output.len();
+                    if let Some(register) = order_registers[index] {
                         output.push(Opcode::Closure as u8);
                         output.push(*function_id as u8);
                         output.push(register as u8);
                     }
+                }
+                InstructionData::CallFunction(target, arguments) => {
+                    output.push(Opcode::CallFunction as u8);
+                    output.push(order_registers[order_indices[*order_function][*target]].unwrap() as u8);
+                    // NOTE: might want to push argument count as well
+                    for argument in arguments {
+                        output.push(order_registers[order_indices[*order_function][*target]].unwrap() as u8);
+                    }
+                }
+                InstructionData::Upindex(target_func, target_id) => {
+                    if let Some(register) = order_registers[index] {
+                        if let Some(target_register) = order_registers[order_indices[*target_func][*target_id]] {
+                            output.push(Opcode::Upindex as u8);
+                            output.push(target_register as u8);
+                            output.push(register as u8);
+                        }
+                    }
 
                 }
-                InstructionData::CallFunction(function_id, arguments) => {
-                    inserted_ids = output.len();
-                    output.push(Opcode::CallFunction as u8);
-                    output.push(variable_registers[instruction_indices[*function_id]].unwrap() as u8);
-                    for argument in arguments.iter().rev() {
-                        // println!("argument is {:?}", argument);
-                        output.push(variable_registers[instruction_indices[*argument]].unwrap() as u8);
-                    }
-                    // println!("ok so {:?}", instructions[*function_id].data);
-                    // let InstructionData::Closure(closure_function_id) = instructions[*function_id].data else { panic!("not a closure") };;
-                    // inserted_ids = output.len();
-                    // println!("------------------------------=zzzzzzzzzzzzzzzzzzzzzzz function id {:?}", function_id);
-                    // output.push(Opcode::CallFunction as u8);
-                    // output.push(*function_id as u8);
-                }
-                // InstructionData::Phi()
                 e => {
-                    // skipped_instructions += 1;
-                    println!("Unimplemented {:?} with id of {:?}", e, instruction_id);
+                    println!("Unimplemented {:?} with id of {:?}", e, order_id);
                     continue;
                 }
+            }
 
-            }
-            println!("inserted ids {:?}", inserted_ids);
-            let mut removed = None;
-            for (index, location) in replace_instructions.iter().enumerate() {
-                println!("matching {:?} with {:?}", instruction_id, location.0);
-                if *instruction_id == location.0 {
-                    println!("!!!!!!!!!!!! REPLACING INSTRUCTION {:?} with {:?}", location.1, inserted_ids); // NOTE: not instruction_id, repalce it with bytecode!!
-                    println!("its of id {:?}", instruction_id);
-                    println!("first {:?}", instructions[location.0].data);
-                    println!("second {:?}", Opcode::from(output[inserted_ids]));
-                    println!("the target is of {:?}", output[location.1]);
-                    output[location.1] = inserted_ids as u8;
-                    removed = Some(index);
-                    // break;
-                    // might need a break? though  several instructions might have a replace thing
-                }
-            }
-            if let Some(index) = removed {
-                replace_instructions.remove(index);
-            }
-            // decoded_instructions[*instruction_id] = Some(inserted_ids);
         }
-
-        for location in &replace_instructions {
-            println!("DIDNT REMOVE: {:?} (it has {:?})", location, instructions[location.0].data);
-        }
-
-        println!("bytecode: ");
+        println!("compiled bytecode: total len {:?}", all_output.len());
         let mut skip_amount = 0;
         let mut index = 0;
-        for text in output.iter() {
-            // println!("          {:?}", text);
-            if skip_amount > 0 {
-                skip_amount -= 1;
-                println!("          {:?}", text);
-                continue;
+        for (function_id, output) in all_output.iter().enumerate() {
+            println!("================= function id {:?}", function_id);
+            for (pc, text) in output.iter().enumerate() {
+                // println!("          {:?}", text);
+                if skip_amount > 0 {
+                    skip_amount -= 1;
+                    println!("          {:?}", text);
+                    continue;
+                }
+                println!(")");
+                println!("----");
+                match Opcode::from(*text) {
+                    Opcode::Load => skip_amount = 2,
+                    Opcode::Add => skip_amount = 3,
+                    Opcode::Subtract => skip_amount = 3,
+                    Opcode::Multiply => skip_amount = 3,
+                    Opcode::Divide => skip_amount = 3,
+                    Opcode::Remainder => skip_amount = 3,
+                    Opcode::Jump => skip_amount = 1,
+                    Opcode::Equal => skip_amount = 3,
+                    Opcode::NotEqual => skip_amount = 3,
+                    Opcode::GreaterThan => skip_amount = 3,
+                    Opcode::GreaterThanOrEqual => skip_amount = 3,
+                    Opcode::LessThan => skip_amount = 3,
+                    Opcode::LessThanOrEqual => skip_amount = 3,
+                    Opcode::JumpIfEqual => skip_amount = 1,
+                    Opcode::JumpConditional => skip_amount = 2,
+                    Opcode::Print => skip_amount = 1,
+                    Opcode::Closure => skip_amount = 2,
+                    Opcode::CallFunction => skip_amount = 1, // this one is tricky
+                    Opcode::Upindex => skip_amount = 2,
+                    _ => {}
+                }
+                index += 1;
+                println!("{:?}, program counter: {:?} ||    {:?}", index, pc, Opcode::from(*text));
+                println!("(");
             }
-            println!(")");
-            println!("----");
-            match Opcode::from(*text) {
-                Opcode::Load => skip_amount = 2,
-                Opcode::Add => skip_amount = 3,
-                Opcode::Subtract => skip_amount = 3,
-                Opcode::Multiply => skip_amount = 3,
-                Opcode::Divide => skip_amount = 3,
-                Opcode::Remainder => skip_amount = 3,
-                Opcode::Jump => skip_amount = 1,
-                Opcode::Equal => skip_amount = 3,
-                Opcode::NotEqual => skip_amount = 3,
-                Opcode::GreaterThan => skip_amount = 3,
-                Opcode::GreaterThanOrEqual => skip_amount = 3,
-                Opcode::LessThan => skip_amount = 3,
-                Opcode::LessThanOrEqual => skip_amount = 3,
-                Opcode::JumpIfEqual => skip_amount = 1,
-                Opcode::JumpConditional => skip_amount = 2,
-                Opcode::Print => skip_amount = 1,
-                _ => {}
-            }
-            index += 1;
-            println!("{:?}:    {:?}", index, Opcode::from(*text));
-            println!("(");
-        }
-        // NOTE: i could do an optimization pass that would check if a jump instruction merely goes
-        // 1 instruction further
-        // aka
-        // 11 instruction: JumpConditional(12; 14)
-        // 12 instruction: load 2
-        // 13 instruction: jump 14 // this jump is not needed
-        // 14 instruction: load 5
-        println!(")");
 
-        output
+        }
+
+        all_output
     }
-    // pub fn compile_bytecode(&self, post_order: Vec<usize>, immediate_dominators: IndexVec<usize, usize>, dominance_tree: &IndexVec<usize, Vec<usize>>) -> Vec<u8> {
-    //
-    //
-    // }
+
 }
 
 
-impl Instruction {
-    fn has_value(&self) -> bool {
-        match self.data {
-
-            InstructionData::SetVariable(_, _) |
-            InstructionData::Jump(_) |
-            InstructionData::MakeLocal(_) => false,
-            _ => true
+// ultility functions
+impl Module {
+    pub fn for_phi<F: FnMut(usize, usize)>(
+        &self,
+        phi_instructions: &IndexVec<usize, Vec<(usize, usize)>>,
+        map_id: &usize,
+        callback: &mut F
+    ) {
+        for (function_id, phi_arg) in &phi_instructions[*map_id] {
+            let frame = &self.functions[*function_id].frame;
+            if let InstructionData::Phi(new_map) = frame.instructions[*phi_arg].data {
+                if new_map == *map_id {
+                    panic!("same??");
+                }
+                // println!("|| met a phi! {:?} with map {:?}", phi_arg, map_id);
+                self.for_phi(phi_instructions, &new_map, callback);
+                callback(*phi_arg, *function_id);
+            } else {
+                callback(*phi_arg, *function_id)
+            }
         }
     }
-    fn needs_register_output(&self) -> bool {
-        match self.data {
-
-            InstructionData::GetVariable(_) | // shouldnt exist mostly
-            InstructionData::Jump(_) |
-            InstructionData::MakeLocal(_) | // IMPORTANT: should not exist in output bytecode
-            InstructionData::JumpConditional(_, _, _) => false,
-            _ => true
-        }
-    }
-}
-
-impl Block {
-
     pub fn get_successors<F: FnMut(
-        usize,
+        &usize,
+        &usize,
         &IndexVec<usize, Instruction>,
     )>(
         &self,
         instructions: &IndexVec<usize, Instruction>,
-        mut callback: F
+        block: &Block,
+        function_id: &usize,
+        callback: &mut F
     ) {
-        match instructions[self.end.unwrap()].data {
-            InstructionData::Jump(target) => callback(target, instructions),
+        println!("block info: {:?}", block);
+        if block.end.is_none() {
+            println!("no thing found");
+            return
+        }
+        let last_instruction = &instructions[block.end.unwrap()];
+        match last_instruction.data {
+            InstructionData::Jump(target) => {
+                if let Some(prev) = last_instruction.previous {
+                    if let InstructionData::Closure(func, var_id) = instructions[prev].data {
+                        let function = &self.functions[func];
+                        self.get_successors(&function.frame.instructions, &function.frame.blocks[0], &func, callback);
+                    }
+                }
+                callback(function_id, &target, instructions)
+            },
             InstructionData::JumpConditional(_, target_1, target_2) => {
-                callback(target_1, instructions);
-                callback(target_2, instructions)
+                callback(function_id, &target_1, instructions);
+                callback(function_id, &target_2, instructions);
             }
             InstructionData::EndOfFile => {}
             // _ => unimplemented!("tried calling successors on an unterminated block"),
-            _ => println!("unterminated block right here {:?}", self.id),
+            _ => println!("unterminated block right here {:?}", block.id),
         }
     }
 
-    pub fn for_instruction_mut<F: FnMut(usize, &mut IndexVec<usize, Instruction>, &mut Block)>(
-        &mut self,
-        instructions: &mut IndexVec<usize, Instruction>,
-        mut callback: F
-    ) {
-        let mut at = self.start;
-        while let Some(id) = at {
-            // let instruction = ;
-            callback(id, instructions, self);
+    // pub fn get_predecessors(
+    //     &self,
+    // ) -> IndexVec<usize, IndexVec<usize, IndexVec<usize, usize>>> {
+    //     let blocks = &self.functions[0].frame.blocks;
+    //     let instructions = &self.functions[0].frame.instructions;
+    //     let mut predecessors = index_vec![index_vec!(IndexVec::new(); blocks.len()); self.functions.len()];
+    //
+    //     for block in blocks {
+    //         self.get_successors(instructions, block, 0, |function, successor, _| predecessors[function][successor].push((function, block.id)));
+    //         // self.get_successors(instructions, block, |successor, function, _| predecessors[successor].push(block.id));
+    //     }
+    //
+    //     predecessors
+    // }
 
-            at = instructions[id].next;
+    pub fn post_order(
+        &self,
+        frame: &BlockFrame,
+        function_id: &usize,
+        block_id: usize,
+        current_post_order: &mut Vec<(usize, usize)>
+    ) {
+        // println!("function: {:?}, block: {:?}", function_id, block_id);
+        if frame.blocks.get(block_id).is_none()  {
+            return;
+        }
+        let block = &frame.blocks[block_id];
+        let mut at = block.start;
+        while let Some(id) = at {
+            let instruction = &frame.instructions[id];
+            at = instruction.next;
+            println!("-- CURRENT INSTRUCTION: {:?} NEXT: {:?}", instruction.data, at);
+            match instruction.data {
+                InstructionData::Closure(func, _) => {
+                    let function = &self.functions[func];
+                    current_post_order.push((*function_id, instruction.id));
+                    // println!("jumping to {:?}: {:?}", func, instruction.id);
+                    self.post_order(&function.frame, &func, 0, current_post_order);
+                }
+                InstructionData::Jump(target) => {
+                    current_post_order.push((*function_id, instruction.id));
+                    self.post_order(frame, function_id, target, current_post_order);
+                },
+                InstructionData::JumpConditional(_, target_1, target_2) => {
+                    current_post_order.push((*function_id, instruction.id));
+                    self.post_order(frame, function_id, target_1, current_post_order);
+                    self.post_order(frame, function_id, target_2, current_post_order);
+                }
+                _ => {
+                    current_post_order.push((*function_id, instruction.id));
+                }
+            }
+            // println!("      the {:?} instruction is {:?} in block {:?}", instruction.id, instruction.data, instruction.block);
+        }
+    }
+
+
+    // gets the convergence point of a block
+    pub fn dominance_frontier(
+        &self,
+        frame: &BlockFrame,
+        origin_function: usize,
+        convergences: &mut IndexVec<usize, IndexVec<usize, Option<(usize, usize)>, >>
+    ) {
+        for block in &frame.blocks {
+            self.get_successors(&frame.instructions, block, &origin_function, &mut |function_id, target, instructions| {
+                if *function_id == origin_function {
+                    match instructions[block.end.unwrap()].data {
+                        InstructionData::JumpConditional(conditional, target_1, target_2) => {
+                            // TODO: if i add an  else, this needs to check if there is an else
+                            // if yes - set the convergence of this to the else target
+                            // if no - set the convergence to target_2
+                            // if let Some(target) = target_2 {
+                            convergences[*function_id][target_1] = Some((target_2, *function_id));
+                            // }
+                        }
+                        _ => {
+                            // let previous_block = frame.blocks[frame.blocks]
+                            let function_frame = &self.functions[*function_id].frame;
+                            println!("ok so the current function id {:?}, target: {:?}", function_id, target);
+                            let previous_block = function_frame.blocks[*target].previous_block;
+                            if let Some(previous) = previous_block {
+                                convergences[*function_id][*target] = convergences[*function_id][previous];
+                            }
+                        }
+                    }
+                } else {
+                    // panic!("wow");
+                    // this condition never happens because previous function is function frame local!
+                    // if let Some(prev) = previous_function {
+                    //     if prev == origin_function {
+                    //         // set this functions 0th block convergence point to the
+                    //         // predecessors functions next block
+                    //         convergences[function_id][0] =
+                    //         return;
+                    //     }
+                    // }
+                    self.dominance_frontier(&self.functions[*function_id].frame, *function_id,  convergences);
+                    // NOTE: in order ofr this to wor ki need to make ti so that functins will make
+                    // a new block beacuse it wont converge proprely atm after the function
+                    // (or technically i ovuld also amke it so that there is a precise instruction
+                    // location also included in the dominance thing so its not only just with the
+                    // block when it is related to a function)
+                    convergences[*function_id][0] = Some((block.id, *function_id));
+                }
+            });
+        }
+    }
+
+    // fn build_dominance(
+    //     &self,
+    //     frame: &mut BlockFrame,
+    //     post_order: &mut Vec<(usize, usize)>,
+    // ) {
+    //     let mut changed = true;
+    //
+    //     let post_indices = {
+    //         let mut indices: IndexVec<usize, IndexVec<usize, Option<usize>>> = index_vec![index_vec![None; frame.blocks.len()]; self.functions.len()];
+    //         for (index, block) in post_order.iter().enumerate() {
+    //             indices[block.1] = Some(index); // NOTE: make it so that it puts it ot the proper
+    //             // function
+    //         }
+    //
+    //         indices
+    //     };
+    //
+    //     let mut domination = index_vec![index_vec![None; frame.blocks.len()]; self.functions.len()];
+    //     for func in self.functions {
+    //         domination[func.id][0] = Some(0);
+    //     }
+    // }
+    pub fn new_instruction(
+        instructions: &mut IndexVec<usize, Instruction>,
+        instruction: InstructionData,
+        // function: usize
+    ) -> usize {
+        let id = instructions.len();
+        println!("instr len: {:?}", id);
+
+        instructions.push(Instruction {
+            data: instruction,
+            previous: None,
+            next: None,
+            block: None,
+            id,
+            // function
+        });
+
+        id
+    }
+
+    pub fn insert_instruction(
+        frame: &mut BlockFrame,
+        block_id: usize,
+        instruction_id: usize,
+        new_previous: Option<usize>,
+        new_next: Option<usize>,
+    ) {
+        let instruction = frame.instructions[instruction_id].clone();
+        if let Some(prev) = instruction.previous {
+            frame.instructions[prev].next = instruction.next;
+        }
+        if let Some(next) = instruction.next {
+            frame.instructions[next].previous = instruction.previous; // might not need this?
+        }
+        if let Some(instruction_block) = instruction.block {
+            frame.blocks[instruction_block].size -= 1;
+        }
+        // frame.blocks[instruction.block.unwrap()].size -= 1;
+        // frame.instructions
+
+        let block = &mut frame.blocks[block_id];
+        let instruction = &mut frame.instructions[instruction_id];
+
+        instruction.block = Some(block_id);
+        println!("previosu prev: {:?} new: {:?}", instruction.previous, new_previous);
+        instruction.previous = new_previous;
+        println!("previosu next: {:?} new: {:?}", instruction.next, new_next);
+        instruction.next = new_next;
+        block.size += 1;
+
+        if new_previous.is_none() {
+            block.start = Some(instruction_id);
+        }
+        if new_next.is_none() {
+            block.end = Some(instruction_id);
+        }
+
+    }
+    // pub fn insert_instruction(
+    //     frame: &mut BlockFrame,
+    //     // instructions: &mut IndexVec<usize, Instruction>,
+    //     // blocks: &mut Vec<Block>,
+    //     block_id: usize,
+    //     reference: Option<usize>,
+    //     instruction_id: usize,
+    // ) {
+    //     let block = &mut frame.blocks[block_id];
+    //
+    //     let (previous, next) = {
+    //         if let Some(reference_id) = reference {
+    //             (Some(reference_id), frame.instructions[reference_id].next)
+    //         } else {
+    //             (None, block.start)
+    //         }
+    //     };
+    //     println!("WHEN INSERTING {:?} PREVIOUS: {:?}, NEXT: {:?}", instruction_id, previous, next);
+    //
+    //     let instruction = &mut frame.instructions[instruction_id];
+    //
+    //     instruction.block = Some(block_id);
+    //     instruction.previous = previous;
+    //     instruction.next = next;
+    //     block.size += 1;
+    //
+    //     if let Some(prev) = previous {
+    //         frame.instructions[prev].next = Some(instruction_id);
+    //     } else {
+    //         block.start = Some(instruction_id);
+    //     }
+    //
+    //     if let Some(next) = next {
+    //         frame.instructions[next].previous = Some(instruction_id);
+    //     } else {
+    //         block.end = Some(instruction_id);
+    //     }
+    // }
+
+    pub fn add_instruction(frame: &mut BlockFrame, block_id: usize, instruction: InstructionData)  -> usize {
+        let block = &mut frame.blocks[block_id];
+        let old_last = block.end;
+
+        let id = frame.instructions.len();
+        if let Some(end_id) = old_last {
+            frame.instructions[end_id].next = Some(id);
+            block.end = Some(id);
+            block.size += 1;
+        } else {
+            block.start = Some(id);
+            block.end = Some(id);
+            block.size = 1;
+        }
+
+        frame.instructions.push(Instruction {
+            data: instruction,
+            previous: old_last,
+            next: None,
+            block: Some(block_id),
+            id: frame.instructions.len(),
+            // function
+        });
+
+        id
+    }
+    pub fn new_block(&self, blocks: &mut Vec<Block>, current_block: Option<usize>) -> usize {
+        let id = blocks.len();
+        let block = Block {
+            previous_block: current_block,
+            start: None,
+            end: None,
+            size: 0,
+            id,
+        };
+        blocks.push(block);
+
+        id
+    }
+
+    pub fn remove_instruction(
+        // instructions: &mut IndexVec<usize, Instruction>,
+        frame: &mut BlockFrame,
+        block_id: usize,
+        // blocks: &mut Vec<Block>,
+        instruction_id: usize
+    ) -> Option<usize> {
+        let block = &mut frame.blocks[block_id];
+        let instruction = &mut frame.instructions[instruction_id];
+        // let block = &mut blocks[instruction.block?];
+
+        println!("instr: {:?}", instruction.data);
+        let old_previous = instruction.previous;
+        let old_next = instruction.next;
+
+        println!("instruction id {:?} next: {:?} prev: {:?}", instruction.id, instruction.previous, instruction.next);
+        if block.id != instruction.block.unwrap() {
+            panic!("it doesnt match? {:?} != {:?}", block.id, instruction.block);
+        }
+        println!("previous: {:?}, next: {:?}", old_previous, old_next);
+        instruction.previous = None;
+        instruction.next = None;
+        instruction.block = None;
+
+        if let Some(previous) = old_previous {
+            frame.instructions[previous].next = old_next;
+        } else {
+            block.start = old_next;
+            // if instruction_id != 0 {
+            //     panic!("failed to set start for the instruction {:?} whih is in bloick id {:?}", instruction_id, block.id);
+            //
+            // }
+            println!("setting block {:?} start to {:?}", block.id, old_next);
+        }
+
+        if let Some(next) = old_next {
+            frame.instructions[next].previous = old_previous;
+        } else {
+            block.end = old_previous;
+            println!("setting block end to {:?}", old_previous);
+        }
+
+        block.size -= 1;
+        println!("block start is: {:?}", block.start);
+
+        old_next
+    }
+
+    pub fn for_block_mut
+    <F: FnMut(
+        &mut IndexVec<usize, Functions>,
+        usize,
+        usize,
+    )>(
+        &mut self,
+        // instructions: &mut IndexVec<usize, Instruction>,
+        // blocks: &mut Vec<Block>,
+        // frame: &mut BlockFrame,
+        function_id: usize,
+        block_id: usize,
+        callback: &mut F
+    ) {
+        let mut at = self.functions[function_id].frame.blocks[block_id].start;
+        while let Some(id) = at {
+            let instruction = &mut self.functions[function_id].frame.instructions[id];
+            if let InstructionData::Closure(func_id, _) = instruction.data {
+                at = instruction.next;
+                callback(&mut self.functions, function_id, id);
+                for new_block in 0..self.functions[func_id].frame.blocks.len() {
+                    self.for_block_mut(func_id, new_block, callback);
+                }
+                continue;
+            }
+            at = instruction.next;
+
+            callback(&mut self.functions, function_id, id);
+            println!("OK SO DATA2: {:?} ID {:?} FUNC: {:?}", self.functions[function_id].frame.instructions[id].data, id, function_id);
+        }
+    }
+    // loops over every instruction and runs a function for every single argument they have
+    pub fn block_replace_args<F: FnMut(&mut usize, &usize)>(
+        &mut self,
+        block: &Block,
+        function_id: usize,
+        mut callback: F,
+    ) {
+        let mut at = block.start;
+        while let Some(id) = at {
+            let mut instr = self.functions[function_id].frame.instructions[id].clone();
+            Self::replace_instruction(0,  &mut instr.data, &mut callback);
+
+            at = instr.next;
+
+            self.functions[function_id].frame.instructions[id] = instr;
+        }
+    }
+    // loops over every instruction and runs a function for every single argument they have
+    pub fn replace_all_args<F: FnMut(&mut usize, &usize, &IndexVec<usize, Instruction>, usize)>(
+        &mut self,
+        // block: &Block,
+        // function_id: usize,
+        mut callback: F,
+    ) {
+        for function in &mut self.functions {
+            for block in &mut function.frame.blocks {
+                let mut at = block.start;
+                while let Some(id) = at {
+                    let mut instr = function.frame.instructions[id].clone();
+                    println!("current: {:?} next is {:?} function {:?} instr data: {:?}", at, instr.next, function.id, instr.data);
+                    // println!("instr before is {:?}", instr.data);
+                    Self::replace_instruction(function.id,  &mut instr.data, &mut |instr, function_id| {
+                        callback(instr, function_id, &function.frame.instructions, id);
+                    });
+
+                    at = instr.next;
+
+                    // println!("instri s {:?}", instr.data);
+                    function.frame.instructions[id] = instr;
+                }
+            }
+        }
+    }
+    pub fn function_tree<F: FnMut(&usize, &mut IndexVec<usize, Functions>, Option<usize>)>(
+        functions: &mut IndexVec<usize, Functions>,
+        current_function: usize,
+        target_previous: usize,
+        callback: &mut F
+    ) {
+        // panic!("current function {:?} == {:?}, the predecessor {:?}", current_function, target_previous, functions[current_function].predecessor_function);
+        let function_id = functions[current_function].id;
+        if function_id == target_previous {
+            return;
+        }
+        // let function = &self.functions[current_function];
+        if let Some(previous_id) = functions[current_function].predecessor_function {
+            callback(&current_function, functions, Some(previous_id));
+            Self::function_tree(functions, previous_id, target_previous, callback);
+        } else {
+            callback(&current_function, functions, None);
+        }
+    }
+
+    pub fn instruction_args<F: FnMut(&usize, &usize)>(
+        function_id: usize,
+        instruction: &InstructionData,
+        callback: &mut F,
+    )  {
+        match instruction {
+            InstructionData::Print(data) => callback(data, &function_id),
+            InstructionData::MathOperands(variant, num_1, num_2) => {
+                callback(num_1, &function_id);
+                callback(num_2, &function_id);
+            }
+            InstructionData::ComparisonOperands(variant, num_1, num_2) => {
+                callback(num_1, &function_id);
+                callback(num_2, &function_id);
+            }
+            InstructionData::CallFunction(num_1, args) => {
+                // TODO: might need to do a iterator with callback on every single argument of call
+                // function
+                callback(num_1, &function_id);
+                for arg in args {
+                    callback(arg, &function_id);
+                }
+            }
+            // InstructionData::Upindex(func, num_1) => {
+            //     callback(func, num_1);
+            // }
+            InstructionData::JumpConditional(instruction, v1, v2) => callback(instruction, &function_id),
+
+            // TODO: add more comparisons, return, calls, tuples, lists here too
+            e => {
+                // unimplemented!("{:?}", e)
+            }
+        }
+    }
+    pub fn replace_instruction<F: FnMut(&mut usize, &usize)>(
+        function_id: usize,
+        instruction: &mut InstructionData,
+        callback: &mut F,
+    ) -> Option<InstructionData> {
+        match instruction {
+            InstructionData::Copy(data) =>  {  println!("copy before {:?}", data); callback(data, &function_id); println!("copy should be {:?}", data); Some(InstructionData::Copy(*data))},
+            InstructionData::Print(data) => { callback(data, &function_id); Some(InstructionData::Print(*data)) },
+            InstructionData::MathOperands(variant, num_1, num_2) => {
+                callback(num_1, &function_id);
+                callback(num_2, &function_id);
+
+                Some(InstructionData::MathOperands(variant.clone(), *num_1, *num_2))
+            }
+            InstructionData::ComparisonOperands(variant, num_1, num_2) => {
+                callback(num_1, &function_id);
+                callback(num_2, &function_id);
+
+                Some(InstructionData::ComparisonOperands(variant.clone(), *num_1, *num_2))
+            }
+            InstructionData::CallFunction(num_1, args) => {
+                // TODO: might need to do a iterator with callback on every single argument of call
+                // function
+                callback(num_1, &function_id);
+                for arg in &mut *args {
+                    callback(arg, &function_id);
+                }
+
+                Some(InstructionData::CallFunction(*num_1, args.to_vec()))
+            }
+
+            InstructionData::JumpConditional(instruction, v1, v2) => { callback(instruction, &function_id); Some(InstructionData::JumpConditional(*instruction, *v1, *v2))},
+
+            // TODO: add more comparisons, return, calls, tuples, lists here too
+            e => {
+                // unimplemented!("{:?}", e)
+                None
+            }
+        }
+    }
+}
+
+impl BlockFrame {
+    pub fn new(function_id: usize, phi_instructions: Option<IndexVec<usize, Vec<(usize, usize)>>>) -> Self {
+        Self {
+            instructions: IndexVec::new(),
+            blocks: Vec::new(),
+            id: function_id,
+            phi_instructions
+        }
+    }
+}
+impl Instruction {
+    fn has_value(&self) -> bool {
+        match self.data {
+            InstructionData::SetVariable(_, _) |
+            InstructionData::SetUpvalue(_, _, _) |
+            InstructionData::Jump(_) |
+            InstructionData::MakeLocal(_) => false,
+            _ => true
         }
     }
 }

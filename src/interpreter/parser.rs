@@ -4,7 +4,7 @@ use logos::{Lexer, Logos};
 
 use chumsky::{combinator::To, prelude::*};
 
-use crate::interpreter::codegen2::{ComparisonVariant, MathVariant};
+use crate::interpreter::codegen::{ComparisonVariant, MathVariant};
 // use crate::interpreter::codegen2::{ComparisonVariant, MathVariant};
 // // IMPORTANT: DELETE THE VARIANT ENUMS BELOW
 // #[derive(Clone, Hash, PartialEq, Eq, Debug)]
